@@ -270,7 +270,7 @@ def per_class_detection_rate(
             "Missed": missed,
             "Detection Rate (%)": f"{rate:.1f}%",
         })
-    return pd.DataFrame(rows).sort_values("Total", ascending=False)
+    df = pd.DataFrame(rows); return df.sort_values("Total", ascending=False) if not df.empty else df
 
 
 def generate_report(
