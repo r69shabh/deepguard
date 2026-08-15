@@ -13,7 +13,7 @@ All detectors share a common interface: fit / predict / score / evaluate / save 
 
 Usage
 -----
->>> from src.models import GMMDetector
+>>> from anomaly_ids.models import GMMDetector
 >>> model = GMMDetector(n_components=12, covariance_type="full")
 >>> model.fit(X_train)
 >>> metrics = model.evaluate(X_test, y_test)

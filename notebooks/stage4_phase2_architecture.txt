@@ -1,0 +1,534 @@
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+
+print(f"TensorFlow version: {tf.__version__}")
+print(f"NumPy version: {np.__version__}")
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+# W=50: at ~10 flows/min typical enterprise rate, captures ~5 min of traffic.
+# This window covers common C2 beacon intervals and multi-stage attack sequences.
+WINDOW_SIZE   = 50
+
+# Stride=10 for training: overlapping windows provide data augmentation.
+# ~1.5M flows / stride 10 ≈ 150K training sequences — sufficient for deep learning.
+STRIDE_TRAIN  = 10
+
+# Stride=1 for test: dense evaluation ensures no attack subsequence is missed.
+# Every 50-flow sub-sequence in the test set receives a reconstruction error.
+STRIDE_TEST   = 1
+
+# Bottleneck dimension: 1700-dim sequence (50×34) → 32-dim latent.
+# Compression ratio ~53× forces the network to learn a compact benign manifold.
+LATENT_DIM    = 32
+
+# Batch size 256: large enough for stable gradient estimates on MSE loss.
+# Smaller batches (e.g., 32) would increase noise; larger (512+) may miss fine structure.
+BATCH_SIZE    = 256
+
+# 100 epochs is the upper bound; early stopping typically triggers at 20–40.
+EPOCHS        = 100
+
+RANDOM_STATE  = 42
+
+# 20% of benign training sequences held out for early stopping and threshold calibration.
+VAL_SPLIT     = 0.2
+
+print("\nHyperparameter summary:")
+print(f"  Window size      W = {WINDOW_SIZE}")
+print(f"  Training stride  S = {STRIDE_TRAIN}")
+print(f"  Test stride      S = {STRIDE_TEST}")
+print(f"  Latent dim       d = {LATENT_DIM}")
+print(f"  Batch size         = {BATCH_SIZE}")
+print(f"  Max epochs         = {EPOCHS}")
+
+# ── Load Phase 1 preprocessed data ────────────────────────────────────────────
+# Phase 1 pipeline: 5-stage preprocessing → RobustScaler → 34 features
+# X_train: benign-only flows used for unsupervised training
+# X_test:  benign + attack flows used for evaluation
+# y_test:  binary labels (0=benign, 1=attack) aligned with X_test rows
+
+PROJECT_ROOT = Path.cwd().parent
+PREPROC_DIR  = PROJECT_ROOT / 'outputs' / 'preprocessing'
+SEQ_DIR      = PROJECT_ROOT / 'outputs' / 'sequences'
+SEQ_DIR.mkdir(parents=True, exist_ok=True)
+
+X_train = np.load(PREPROC_DIR / 'X_train.npy')
+X_test  = np.load(PREPROC_DIR / 'X_test.npy')
+y_test  = np.load(PREPROC_DIR / 'y_test.npy')
+
+with open(PREPROC_DIR / 'feature_names.txt') as f:
+    feature_names = [line.strip() for line in f]
+
+N_FEATURES = len(feature_names)
+
+print("Phase 1 data loaded:")
+print(f"  X_train : {X_train.shape}  (benign flows only)")
+print(f"  X_test  : {X_test.shape}   (benign + attack flows)")
+print(f"  y_test  : {y_test.shape}   distribution → {np.bincount(y_test.astype(int))} (0=benign, 1=attack)")
+print(f"  Features: {N_FEATURES}     {feature_names[:5]} ...")
+print(f"\n  Attack prevalence in test set: {y_test.mean()*100:.1f}%")
+
+# ── Sequence construction ──────────────────────────────────────────────────────
+
+def make_sequences(X: np.ndarray, window_size: int, stride: int) -> np.ndarray:
+    """
+    Convert a flat flow array to overlapping fixed-length windows.
+
+    Parameters
+    ----------
+    X           : (N, F) array of N flows, each with F features
+    window_size : W — number of consecutive flows per sequence
+    stride      : S — step between consecutive window start positions
+
+    Returns
+    -------
+    sequences : (num_windows, W, F) float32 array
+
+    Notes
+    -----
+    num_windows = floor((N - W) / S) + 1
+
+    stride=10 for training increases sequence diversity via overlap.
+    stride=1  for testing provides dense coverage — every 50-flow
+    subsequence receives a reconstruction error score.
+
+    Using stride_tricks for memory efficiency on large arrays.
+    """
+    N, F = X.shape
+    num_windows = (N - window_size) // stride + 1
+
+    # stride_tricks avoids copying data: each window is a view into X
+    # shape: (num_windows, window_size, F)
+    # strides: (stride * X.strides[0], X.strides[0], X.strides[1])
+    shape   = (num_windows, window_size, F)
+    strides = (stride * X.strides[0], X.strides[0], X.strides[1])
+    windows = np.lib.stride_tricks.as_strided(X, shape=shape, strides=strides)
+
+    # Copy to contiguous float32 array (required for TF dataset)
+    return np.array(windows, dtype=np.float32)
+
+
+def make_seq_labels(y: np.ndarray, window_size: int, stride: int) -> np.ndarray:
+    """
+    Derive sequence-level binary labels from flow-level labels.
+
+    Labelling policy: a sequence X^(t) = [x_t, ..., x_{t+W-1}] is labelled
+    as ANOMALOUS (1) if ANY of its constituent flows is an attack flow.
+
+    Rationale: a sequence containing even a single attack flow is suspicious —
+    the reconstruction error will be elevated by that flow's contribution.
+    This is a conservative labelling that maximises recall at the sequence level.
+
+    Parameters
+    ----------
+    y           : (N,) binary flow-level labels
+    window_size : W
+    stride      : S
+
+    Returns
+    -------
+    labels : (num_windows,) int32 array, values in {0, 1}
+    """
+    N = len(y)
+    num_windows = (N - window_size) // stride + 1
+    labels = np.zeros(num_windows, dtype=np.int32)
+
+    for k in range(num_windows):
+        start = k * stride
+        window_y = y[start : start + window_size]
+        labels[k] = 1 if np.any(window_y == 1) else 0
+
+    return labels
+
+
+# Build sequences
+print("Building sequences...")
+
+X_train_seq = make_sequences(X_train, WINDOW_SIZE, STRIDE_TRAIN)
+print(f"  Training sequences : {X_train_seq.shape}  (expected ~151,830)")
+print(f"  Memory             : {X_train_seq.nbytes / 1e9:.2f} GB")
+
+X_test_seq = make_sequences(X_test, WINDOW_SIZE, STRIDE_TEST)
+print(f"  Test sequences     : {X_test_seq.shape}")
+print(f"  Memory             : {X_test_seq.nbytes / 1e9:.2f} GB")
+
+# ── Test labels and train/val split ───────────────────────────────────────────
+print("Building test sequence labels...")
+y_test_seq = make_seq_labels(y_test, WINDOW_SIZE, STRIDE_TEST)
+
+n_seq_benign = (y_test_seq == 0).sum()
+n_seq_attack = (y_test_seq == 1).sum()
+print(f"  Test sequence labels (ANY policy): {np.bincount(y_test_seq)}")
+print(f"  Attack seq prevalence: {n_seq_attack / len(y_test_seq) * 100:.1f}%")
+
+# ── IMPORTANT: Test set shuffle note ─────────────────────────────────────────
+# Phase 1 used sklearn's train_test_split (shuffle=True by default), so X_test
+# flows are in RANDOM order — not temporal order. With ~47% attack prevalence,
+# virtually every 50-flow window contains >=1 attack flow
+# (P(all benign in window) ~ 0.53^50 ~ 1e-14). So ANY-policy labels are ~all 1.
+#
+# Evaluation strategy for reconstruction-based anomaly detection:
+#   1. Per-FLOW score: for each flow i, average the reconstruction error
+#      of all windows containing flow i (windows t: t <= i <= t+W-1).
+#      This maps the window-level score back to flow-level, enabling
+#      ROC/AUC computed against the original y_test (N=716K flows).
+#
+#   2. Score distribution: compare reconstruction errors for windows
+#      that are 100% benign vs windows with >=50% attack flows.
+#
+# We save a continuous "attack fraction" per window for richer evaluation
+# in Stage 5 (model training & evaluation notebook).
+
+def make_seq_attack_fraction(y, window_size, stride):
+    """
+    Compute the fraction of attack flows in each window.
+    Returns float32 array in [0, 1]. More informative than binary label
+    when test flows are randomly shuffled.
+    """
+    N = len(y)
+    num_windows = (N - window_size) // stride + 1
+    fracs = np.zeros(num_windows, dtype=np.float32)
+    for k in range(num_windows):
+        start = k * stride
+        fracs[k] = float(y[start : start + window_size].mean())
+    return fracs
+
+print("\nComputing attack fraction per test window...")
+y_test_seq_frac = make_seq_attack_fraction(y_test, WINDOW_SIZE, STRIDE_TEST)
+
+pure_benign_mask  = y_test_seq_frac == 0.0
+pure_attack_mask  = y_test_seq_frac == 1.0
+mixed_mask        = (y_test_seq_frac > 0) & (y_test_seq_frac < 1)
+majority_att_mask = y_test_seq_frac >= 0.5
+
+print(f"\n  Window composition (total {len(y_test_seq_frac):,}):")
+print(f"    Pure benign  (0% attack)  : {pure_benign_mask.sum():>8,}  ({pure_benign_mask.mean()*100:.1f}%)")
+print(f"    Pure attack  (100% attack): {pure_attack_mask.sum():>8,}  ({pure_attack_mask.mean()*100:.1f}%)")
+print(f"    Mixed windows             : {mixed_mask.sum():>8,}  ({mixed_mask.mean()*100:.1f}%)")
+print(f"    >=50%% attack              : {majority_att_mask.sum():>8,}  ({majority_att_mask.mean()*100:.1f}%)")
+print("\n  => Because test flows are randomly shuffled from Phase 1,")
+print("     pure-benign windows are rare. Primary evaluation will use")
+print("     per-FLOW AUC: aggregate window scores back to flow level.")
+
+# Train/validation split (all training sequences are benign)
+print("\nSplitting training sequences into train / validation...")
+X_tr, X_val = train_test_split(
+    X_train_seq, test_size=VAL_SPLIT, random_state=RANDOM_STATE, shuffle=True
+)
+print(f"  Train : {X_tr.shape}")
+print(f"  Val   : {X_val.shape}")
+
+
+# ── Save sequences to disk ────────────────────────────────────────────────────
+print("Saving sequences to outputs/sequences/...")
+
+np.save(SEQ_DIR / 'X_train_seq.npy', X_tr)
+np.save(SEQ_DIR / 'X_val_seq.npy',   X_val)
+np.save(SEQ_DIR / 'X_test_seq.npy',  X_test_seq)
+np.save(SEQ_DIR / 'y_test_seq.npy',  y_test_seq)
+np.save(SEQ_DIR / 'y_test_seq_frac.npy', y_test_seq_frac)
+
+# Save metadata for downstream notebooks
+import pickle
+meta = {
+    'window_size':   WINDOW_SIZE,
+    'stride_train':  STRIDE_TRAIN,
+    'stride_test':   STRIDE_TEST,
+    'latent_dim':    LATENT_DIM,
+    'batch_size':    BATCH_SIZE,
+    'epochs':        EPOCHS,
+    'val_split':     VAL_SPLIT,
+    'n_features':    N_FEATURES,
+    'n_train_seq':   len(X_tr),
+    'n_val_seq':     len(X_val),
+    'n_test_seq':    len(X_test_seq),
+    'n_attack_seq':  int(n_seq_attack),
+    'n_benign_seq':  int(n_seq_benign),
+    'note_shuffle':  (
+        "Test flows are randomly shuffled from Phase 1 train_test_split. "
+        "Evaluation uses per-flow AUC (aggregate window scores to flow level) "
+        "rather than per-sequence binary labels."
+    ),
+}
+with open(SEQ_DIR / 'sequence_metadata.pkl', 'wb') as f:
+    pickle.dump(meta, f)
+
+print("\nSaved:")
+for f in sorted(SEQ_DIR.iterdir()):
+    size_mb = f.stat().st_size / 1e6
+    print(f"  {f.name:<35} {size_mb:6.1f} MB")
+
+print("\n✓ Data preparation complete. Ready for Stage 5 model building.")
+print("\n  Key note: evaluation in Stage 5 will use per-flow AUC by")
+print("  mapping window reconstruction errors back to individual flows.")
+
+
+# Set non-interactive backend if running without display
+import os
+if os.environ.get('DISPLAY') is None and os.name != 'nt':
+    import matplotlib
+    matplotlib.use('Agg')
+
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+import matplotlib.patheffects as pe
+import warnings
+warnings.filterwarnings('ignore')
+
+# ── Visual style — match Phase 1 architecture diagram ─────────────────────────
+matplotlib.rcParams.update({
+    'font.family':      'DejaVu Sans',
+    'font.size':        9,
+    'axes.titlesize':   11,
+    'figure.facecolor': '#FAFAFA',
+    'savefig.dpi':      150,
+    'savefig.bbox':     'tight',
+})
+
+# Colour palette
+C_INPUT    = '#AED6F1'   # light blue  — input layers
+C_ENCODER  = '#A9DFBF'   # light green — encoder layers
+C_LATENT   = '#F9E79F'   # yellow      — bottleneck
+C_DECODER  = '#F1948A'   # salmon      — decoder layers
+C_OUTPUT   = '#D2B4DE'   # lavender    — output / score
+C_PHASE1   = '#D5D8DC'   # light grey  — Phase 1 GMM (greyed out)
+C_PHASE3   = '#D5D8DC'   # light grey  — Phase 3 Hybrid (future)
+C_EDGE     = '#2C3E50'   # dark navy   — arrows
+C_DASHED   = '#7F8C8D'   # grey        — dashed future components
+
+fig, ax = plt.subplots(figsize=(18, 13))
+ax.set_xlim(0, 18)
+ax.set_ylim(0, 13)
+ax.axis('off')
+fig.patch.set_facecolor('#FAFAFA')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def box(ax, x, y, w, h, label, sublabel='', color='#FFFFFF',
+        fontsize=8.5, bold=False, alpha=1.0, linestyle='solid'):
+    rect = FancyBboxPatch(
+        (x - w/2, y - h/2), w, h,
+        boxstyle='round,pad=0.05',
+        facecolor=color, edgecolor=C_EDGE if linestyle == 'solid' else C_DASHED,
+        linewidth=1.4, alpha=alpha,
+        linestyle=linestyle
+    )
+    ax.add_patch(rect)
+    weight = 'bold' if bold else 'normal'
+    ax.text(x, y + (0.1 if sublabel else 0), label,
+            ha='center', va='center', fontsize=fontsize,
+            fontweight=weight, color='#2C3E50', alpha=alpha)
+    if sublabel:
+        ax.text(x, y - 0.22, sublabel,
+                ha='center', va='center', fontsize=7,
+                color='#566573', alpha=alpha)
+
+
+def arrow(ax, x1, y1, x2, y2, color=C_EDGE, lw=1.5,
+          arrowstyle='->', linestyle='solid', alpha=1.0):
+    ax.annotate("",
+        xy=(x2, y2), xytext=(x1, y1),
+        arrowprops=dict(
+            arrowstyle=arrowstyle,
+            color=color,
+            lw=lw,
+            linestyle=linestyle,
+            alpha=alpha,
+            connectionstyle='arc3,rad=0'
+        )
+    )
+
+
+def section_label(ax, x, y, text, color):
+    ax.text(x, y, text, ha='center', va='center',
+            fontsize=12, fontweight='bold', color=color,
+            bbox=dict(boxstyle='round,pad=0.3', facecolor=color,
+                      edgecolor=color, alpha=0.15))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Title
+# ─────────────────────────────────────────────────────────────────────────────
+ax.text(9, 12.5,
+        'Phase 2 — Deep Learning Anomaly Detection Architecture',
+        ha='center', va='center', fontsize=14, fontweight='bold', color='#2C3E50')
+ax.text(9, 12.0,
+        'LSTM Autoencoder (left) vs. Transformer Autoencoder (right)  |  '
+        'Input: sliding windows of W=50 flows, F=34 features',
+        ha='center', va='center', fontsize=9, color='#566573')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEFT SIDE — LSTM Autoencoder
+# ─────────────────────────────────────────────────────────────────────────────
+LX = 4.0   # centre x of left column
+
+section_label(ax, LX, 11.4, 'LSTM Autoencoder (Model B₁)', '#1A5276')
+
+layer_specs_lstm = [
+    # (y, label, sublabel, color)
+    (10.55, 'Input Sequence',       '(50, 34)  W=50 flows × 34 features', C_INPUT),
+    (9.55,  'Encoder LSTM 1',       '128 units | return_seq=True | Dropout 0.2', C_ENCODER),
+    (8.55,  'Encoder LSTM 2',       '64 units | return_seq=False', C_ENCODER),
+    (7.55,  'Latent z',             'Dense(32, ReLU) | 1700 → 32 dims', C_LATENT),
+    (6.55,  'RepeatVector(50)',      'Expand z back to sequence length', C_LATENT),
+    (5.55,  'Decoder LSTM 1',       '64 units | return_seq=True | Dropout 0.2', C_DECODER),
+    (4.55,  'Decoder LSTM 2',       '128 units | return_seq=True', C_DECODER),
+    (3.55,  'TimeDistributed Dense','Dense(34, linear) → X̂ ∈ ℝ^{50×34}', C_OUTPUT),
+    (2.55,  'Anomaly Score',        's(X) = (1/50) Σ‖xᵢ − x̂ᵢ‖²', C_OUTPUT),
+    (1.55,  'Threshold τ',          'μ_benign + k·σ_benign | k tuned on val', C_OUTPUT),
+]
+
+for (y, lbl, sub, col) in layer_specs_lstm:
+    box(ax, LX, y, 5.5, 0.70, lbl, sub, color=col)
+
+# Arrows between LSTM layers
+for i in range(len(layer_specs_lstm) - 1):
+    y_top = layer_specs_lstm[i][0] - 0.35
+    y_bot = layer_specs_lstm[i+1][0] + 0.35
+    arrow(ax, LX, y_top, LX, y_bot)
+
+# Encoder/Decoder bracket annotations
+ax.annotate('', xy=(1.0, 8.2), xytext=(1.0, 10.9),
+            arrowprops=dict(arrowstyle='<->', color=C_ENCODER, lw=1.5))
+ax.text(0.55, 9.55, 'ENCODER', va='center', ha='center', fontsize=8,
+        color=C_ENCODER, fontweight='bold', rotation=90)
+
+ax.annotate('', xy=(1.0, 3.2), xytext=(1.0, 6.9),
+            arrowprops=dict(arrowstyle='<->', color=C_DECODER, lw=1.5))
+ax.text(0.55, 5.05, 'DECODER', va='center', ha='center', fontsize=8,
+        color=C_DECODER, fontweight='bold', rotation=90)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RIGHT SIDE — Transformer Autoencoder
+# ─────────────────────────────────────────────────────────────────────────────
+RX = 14.0   # centre x of right column
+
+section_label(ax, RX, 11.4, 'Transformer Autoencoder (Model B₂)', '#6E2F8E')
+
+layer_specs_tfm = [
+    (10.55, 'Input Sequence',         '(50, 34)  W=50 flows × 34 features', C_INPUT),
+    (9.55,  'Positional Encoding',    'Sinusoidal PE added to input embeddings', C_INPUT),
+    (8.65,  'Input Projection',       'Dense(64) → d_model=64', C_ENCODER),
+    (7.80,  'Enc TransformerBlock 1', 'MHA(heads=4, dₖ=16) + FFN(128) + LayerNorm', C_ENCODER),
+    (6.95,  'Enc TransformerBlock 2', 'MHA(heads=4, dₖ=16) + FFN(128) + LayerNorm | Dropout 0.2', C_ENCODER),
+    (6.10,  'Global Avg Pool → Latent z', 'GlobalAvgPool1D → Dense(32, ReLU) | 1700→32', C_LATENT),
+    (5.25,  'Latent Expansion',       'Dense(3200) → Reshape(50, 64)', C_LATENT),
+    (4.40,  'Dec TransformerBlock 1', 'MHA(heads=4, dₖ=16) + FFN(128) + LayerNorm', C_DECODER),
+    (3.55,  'Dec TransformerBlock 2', 'MHA(heads=4, dₖ=16) + FFN(128) + LayerNorm', C_DECODER),
+    (2.70,  'Output Projection',      'Dense(34, linear) → X̂ ∈ ℝ^{50×34}', C_OUTPUT),
+    (1.85,  'Anomaly Score + τ',      's(X) = (1/50) Σ‖xᵢ − x̂ᵢ‖²  |  τ = μ + k·σ', C_OUTPUT),
+]
+
+for (y, lbl, sub, col) in layer_specs_tfm:
+    box(ax, RX, y, 5.5, 0.63, lbl, sub, color=col)
+
+for i in range(len(layer_specs_tfm) - 1):
+    y_top = layer_specs_tfm[i][0] - 0.315
+    y_bot = layer_specs_tfm[i+1][0] + 0.315
+    arrow(ax, RX, y_top, RX, y_bot)
+
+# Attention symbol annotations on Transformer blocks
+for y in [7.80, 6.95, 4.40, 3.55]:
+    ax.text(RX + 2.9, y, '⚡', fontsize=11, va='center', ha='center', alpha=0.6)
+
+# Encoder/Decoder bracket annotations (Transformer)
+ax.annotate('', xy=(17.1, 5.8), xytext=(17.1, 10.9),
+            arrowprops=dict(arrowstyle='<->', color=C_ENCODER, lw=1.5))
+ax.text(17.55, 8.35, 'ENCODER', va='center', ha='center', fontsize=8,
+        color=C_ENCODER, fontweight='bold', rotation=90)
+
+ax.annotate('', xy=(17.1, 1.5), xytext=(17.1, 5.1),
+            arrowprops=dict(arrowstyle='<->', color=C_DECODER, lw=1.5))
+ax.text(17.55, 3.3, 'DECODER', va='center', ha='center', fontsize=8,
+        color=C_DECODER, fontweight='bold', rotation=90)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CENTRE — Phase 1 GMM + Phase 3 Hybrid (greyed out)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Phase 1 GMM box (grey, dashed)
+box(ax, 9.0, 7.55, 2.8, 0.70,
+    'Phase 1 — GMM', 'K=12 | F1=90.97% | per-flow score',
+    color=C_PHASE1, alpha=0.7, linestyle='dashed')
+ax.text(9.0, 8.3, 'Baseline Model A', ha='center', va='center',
+        fontsize=7.5, color=C_DASHED, style='italic')
+
+# Arrows from both models and Phase 1 to Phase 3
+# Left model score → centre
+arrow(ax, LX + 2.75, 1.55, 7.55, 3.15, color=C_DASHED, lw=1.2,
+      linestyle='dashed', alpha=0.6)
+# Right model score → centre
+arrow(ax, RX - 2.75, 1.85, 10.45, 3.15, color=C_DASHED, lw=1.2,
+      linestyle='dashed', alpha=0.6)
+# Phase 1 GMM → centre
+arrow(ax, 9.0, 7.2, 9.0, 4.2, color=C_DASHED, lw=1.2,
+      linestyle='dashed', alpha=0.6)
+
+# Phase 3 Hybrid box (grey, dashed)
+box(ax, 9.0, 3.55, 2.8, 0.85,
+    '⟶ Phase 3: Hybrid Ensemble ⟵', 'GMM score + DL score → fusion layer',
+    color=C_PHASE3, alpha=0.6, linestyle='dashed')
+ax.text(9.0, 2.95, '(Future work — Phase 3)', ha='center', va='center',
+        fontsize=7, color=C_DASHED, style='italic')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared input annotation
+# ─────────────────────────────────────────────────────────────────────────────
+box(ax, 9.0, 10.55, 2.6, 0.62,
+    'Sliding Window Input', 'X^(t) ∈ ℝ^{50×34}  |  S=10 train, S=1 test',
+    color='#D6EAF8', bold=False)
+
+arrow(ax, 7.7, 10.55, LX + 2.75, 10.55, color='#2980B9', lw=1.3)
+arrow(ax, 10.3, 10.55, RX - 2.75, 10.55, color='#8E44AD', lw=1.3)
+arrow(ax, 9.0, 10.24, 9.0, 7.9, color=C_DASHED, lw=1.1,
+      linestyle='dashed', alpha=0.55)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legend
+# ─────────────────────────────────────────────────────────────────────────────
+legend_items = [
+    (C_INPUT,   'Input / Preprocessing'),
+    (C_ENCODER, 'Encoder layers'),
+    (C_LATENT,  'Bottleneck / Latent'),
+    (C_DECODER, 'Decoder layers'),
+    (C_OUTPUT,  'Output / Anomaly scoring'),
+    (C_PHASE1,  'Baseline / Future (greyed out)'),
+]
+handles = [
+    mpatches.Patch(facecolor=c, edgecolor=C_EDGE, label=lbl, linewidth=0.8)
+    for c, lbl in legend_items
+]
+ax.legend(handles=handles, loc='lower center', ncol=3,
+          bbox_to_anchor=(0.5, -0.02),
+          fontsize=8, framealpha=0.85, edgecolor='#BDC3C7')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Footer
+# ─────────────────────────────────────────────────────────────────────────────
+ax.text(9.0, 0.55,
+        'Model B candidates — evaluated and compared in Section 3 (Stage 5)  '
+        '|  Best Model B advances to Phase 3 hybrid fusion with Model A (GMM)',
+        ha='center', va='center', fontsize=8.5, color='#566573',
+        bbox=dict(boxstyle='round,pad=0.3', facecolor='#EBF5FB',
+                  edgecolor='#AED6F1', linewidth=1))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Save
+# ─────────────────────────────────────────────────────────────────────────────
+OUT_DIR = PROJECT_ROOT / 'outputs'
+
+fig.savefig(OUT_DIR / 'architecture_diagram_phase2.png', dpi=150, bbox_inches='tight',
+            facecolor='#FAFAFA')
+fig.savefig(OUT_DIR / 'architecture_diagram_phase2.pdf', bbox_inches='tight',
+            facecolor='#FAFAFA')
+
+plt.tight_layout()
+plt.show()
+print("\nSaved: outputs/architecture_diagram_phase2.{png,pdf}")

@@ -1,0 +1,92 @@
+# ─────────────────────────────────────────────────────────────
+# configs/default.yaml
+# All project hyperparameters in one place.
+# Override individual values without touching source code.
+# ─────────────────────────────────────────────────────────────
+
+paths:
+  data_dir:        data/CICIDS2017          # raw CSV files
+  prep_dir:        outputs/preprocessing   # X_train.npy, X_test.npy, y_test.npy
+  seq_dir:         outputs/sequences       # X_train_seq.npy, X_test_seq.npy
+  models_dir:      models
+  outputs_dir:     outputs/models
+  results_dir:     results
+  logs_dir:        logs
+
+seed: 42
+
+# ─────────────────────────────────────────────────────────────
+# Feature engineering
+# ─────────────────────────────────────────────────────────────
+features:
+  iqr_lower:         0.01
+  iqr_upper:         0.99
+  skew_threshold:    1.0
+  corr_threshold:    0.95
+
+# ─────────────────────────────────────────────────────────────
+# Phase 1 — Model A : Gaussian Mixture Model
+# ─────────────────────────────────────────────────────────────
+gmm:
+  n_components:          12
+  covariance_type:       full
+  threshold_percentile:  11
+  n_init:                3
+  max_iter:              200
+  tune_subsample:        80000
+
+# ─────────────────────────────────────────────────────────────
+# Phase 1 — Baseline models (Isolation Forest, OCSVM)
+# ─────────────────────────────────────────────────────────────
+isolation_forest:
+  n_estimators:    50
+  contamination:   0.15
+  max_features:    0.5
+
+ocsvm:
+  nu:          0.2
+  kernel:      rbf
+  gamma:       0.1
+  train_cap:   8000
+
+# ─────────────────────────────────────────────────────────────
+# Phase 2 — Model B : LSTM Autoencoder
+# ─────────────────────────────────────────────────────────────
+lstm_ae:
+  window_size:      50
+  latent_dim:       32
+  dropout_rate:     0.2
+  epochs:           100
+  batch_size:       256
+  patience:         10
+  val_split:        0.1          # fraction of train sequences held for validation
+  threshold_pct:    95           # percentile of benign val scores → decision threshold
+
+# ─────────────────────────────────────────────────────────────
+# Phase 3 — Model C : Hybrid GMM + LSTM-AE + RF meta-learner
+# ─────────────────────────────────────────────────────────────
+hybrid:
+  window_size:        50
+  stride:             25
+  alpha:              0.7        # GMM weight in simple weighted average
+  meta_learner:       rf         # 'rf' | 'lr' | 'weighted'
+  rf_n_estimators:    100
+  threshold:          0.5
+
+# ─────────────────────────────────────────────────────────────
+# Evaluation
+# ─────────────────────────────────────────────────────────────
+evaluation:
+  roc_plot:         true
+  cm_plot:          true
+  score_dist_plot:  true
+  per_attack_csv:   true
+  report_txt:       true
+
+# ─────────────────────────────────────────────────────────────
+# Detection (inference mode)
+# ─────────────────────────────────────────────────────────────
+detect:
+  model:            hybrid      # 'gmm' | 'lstm_ae' | 'hybrid'
+  batch_size:       1024
+  output_scores:    true        # include raw anomaly scores in output CSV
