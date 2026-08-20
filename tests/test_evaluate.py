@@ -1,5 +1,5 @@
 import numpy as np
-from anomaly_ids.evaluate import compute_metrics, per_class_detection_rate
+from deepguard.evaluate import compute_metrics, per_class_detection_rate
 
 def test_compute_metrics():
     y_true = np.array([0, 0, 1, 1, 1])

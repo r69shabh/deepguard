@@ -25,9 +25,9 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from anomaly_ids.utils import setup_logging, set_seed, load_config, ensure_dirs
-from anomaly_ids.models import GMMDetector, LSTMAEDetector, HybridDetector
-from anomaly_ids.evaluate import (
+from deepguard.utils import setup_logging, set_seed, load_config, ensure_dirs
+from deepguard.models import GMMDetector, LSTMAEDetector, HybridDetector
+from deepguard.evaluate import (
     compute_metrics,
     plot_roc_curve,
     plot_confusion_matrix,

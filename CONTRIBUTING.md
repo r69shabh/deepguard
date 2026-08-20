@@ -44,7 +44,7 @@ At this point, you're ready to make your changes. Feel free to ask for help; eve
 At this point, you should switch back to your master branch and make sure it's up to date with the main repository:
 
 ```sh
-git remote add upstream https://github.com/r69shabh/anomaly-based-ids.git
+git remote add upstream https://github.com/r69shabh/deepguard.git
 git checkout main
 git pull upstream main
 ```

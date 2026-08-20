@@ -1,11 +1,11 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="anomaly-ids",
+    name="deepguard",
     version="1.0.0",
     description="Adaptive Cyber-Physical Security — Anomaly-Based Intrusion Detection",
     author="Rishabh Gusain",
-    packages=find_packages(include=["anomaly_ids", "anomaly_ids.*", "pipelines", "pipelines.*"]),
+    packages=find_packages(include=["deepguard", "deepguard.*", "pipelines", "pipelines.*"]),
     install_requires=[
         "numpy>=1.26.4",
         "pandas>=2.2.1",
@@ -21,7 +21,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "anomaly-ids=main:main",
+            "deepguard=main:main",
         ],
     },
     python_requires=">=3.9",

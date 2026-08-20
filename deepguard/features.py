@@ -12,7 +12,7 @@ leaks into the preprocessing statistics.
 
 Usage
 -----
->>> from anomaly_ids.features import FeatureEngineer
+>>> from deepguard.features import FeatureEngineer
 >>> fe = FeatureEngineer()
 >>> X_train_processed = fe.fit_transform(X_benign_raw)
 >>> X_test_processed  = fe.transform(X_test_raw)

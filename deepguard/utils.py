@@ -1,5 +1,5 @@
 """
-anomaly_ids/utils.py
+deepguard/utils.py
 ====================
 Shared utilities: logging setup, random seeding, config loading, path helpers.
 """
@@ -50,13 +50,13 @@ def setup_logging(
         handlers.append(logging.FileHandler(log_file))
 
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt, handlers=handlers, force=True)
-    logger = logging.getLogger("anomaly_ids")
+    logger = logging.getLogger("deepguard")
     return logger
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Return a child logger under the 'anomaly_ids' namespace."""
-    return logging.getLogger(f"anomaly_ids.{name}")
+    """Return a child logger under the 'deepguard' namespace."""
+    return logging.getLogger(f"deepguard.{name}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

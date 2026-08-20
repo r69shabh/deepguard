@@ -1,5 +1,5 @@
 import numpy as np
-from anomaly_ids.models import IsolationForestDetector, OCSVMDetector, GMMDetector
+from deepguard.models import IsolationForestDetector, OCSVMDetector, GMMDetector
 
 def test_isolation_forest():
     X_train = np.random.randn(100, 5)

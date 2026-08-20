@@ -1,4 +1,4 @@
-# anomaly_ids — Anomaly-Based Intrusion Detection System
+# deepguard — Anomaly-Based Intrusion Detection System
 """
 Top-level package for the anomaly-based-ids project.
 
@@ -12,8 +12,8 @@ Exposes the core modules:
 __version__ = "1.0.0"
 __author__  = "Rishabh Gusain"
 
-from anomaly_ids.features import FeatureEngineer
-from anomaly_ids.models   import (
+from deepguard.features import FeatureEngineer
+from deepguard.models   import (
     GMMDetector,
     IsolationForestDetector,
     OCSVMDetector,

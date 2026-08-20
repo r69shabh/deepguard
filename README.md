@@ -40,8 +40,8 @@ The system operates in a three-phase pipeline, culminating in a highly accurate 
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/r69shabh/anomaly-based-ids.git
-   cd anomaly-based-ids
+   git clone https://github.com/r69shabh/deepguard.git
+   cd deepguard
    ```
 
 2. **(Optional but recommended) Create a virtual environment:**
@@ -108,8 +108,8 @@ python main.py train --config configs/custom_experiment.yaml
 ## 📁 Project Structure
 
 ```text
-anomaly-based-ids/
-├── anomaly_ids/           # Core Python package
+deepguard/
+├── deepguard/           # Core Python package
 │   ├── features.py        # Feature engineering pipeline
 │   ├── models.py          # Model definitions (GMM, LSTM-AE, Hybrid)
 │   ├── evaluate.py        # Evaluation metrics and plotting utils

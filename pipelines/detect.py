@@ -22,9 +22,9 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from anomaly_ids.utils import setup_logging, load_config, ensure_dirs
-from anomaly_ids.features import FeatureEngineer
-from anomaly_ids.models import GMMDetector, LSTMAEDetector, HybridDetector
+from deepguard.utils import setup_logging, load_config, ensure_dirs
+from deepguard.features import FeatureEngineer
+from deepguard.models import GMMDetector, LSTMAEDetector, HybridDetector
 
 logger = setup_logging()
 

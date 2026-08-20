@@ -28,15 +28,15 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from anomaly_ids.utils import setup_logging, set_seed, load_config, get_nested, ensure_dirs
-from anomaly_ids.models import (
+from deepguard.utils import setup_logging, set_seed, load_config, get_nested, ensure_dirs
+from deepguard.models import (
     GMMDetector,
     IsolationForestDetector,
     OCSVMDetector,
     LSTMAEDetector,
     HybridDetector,
 )
-from anomaly_ids.evaluate import compute_metrics, generate_report
+from deepguard.evaluate import compute_metrics, generate_report
 
 logger = setup_logging()
 

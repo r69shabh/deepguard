@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from anomaly_ids.features import FeatureEngineer
+from deepguard.features import FeatureEngineer
 
 def test_feature_engineer_fit_transform():
     # Create some dummy benign data
