@@ -1,254 +1,151 @@
-# Adaptive Cyber-Physical Security — Anomaly-Based Intrusion Detection
+# Adaptive Cyber-Physical Security: Anomaly-Based Intrusion Detection
 
-[![Phase 1](https://img.shields.io/badge/Phase%201-Complete-brightgreen)]()
-[![Phase 2](https://img.shields.io/badge/Phase%202-Complete-brightgreen)]()
-[![Phase 3](https://img.shields.io/badge/Phase%203-Complete-brightgreen)]()
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]()
+[![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.14+-orange.svg)](https://tensorflow.org)
+[![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4+-F7931E.svg)](https://scikit-learn.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-## Project Overview
+An end-to-end Machine Learning pipeline for **Anomaly-Based Network Intrusion Detection**.
 
-Modern industrial and cyber-physical systems face an ever-growing threat landscape in which
-adversaries increasingly exploit zero-day vulnerabilities — attack vectors unseen by
-signature-based intrusion detection systems (IDS). Traditional rule-based and supervised
-approaches require labeled attack examples to train on; in practice, novel malware and
-advanced persistent threats arrive faster than labels can be curated. This project addresses
-that gap by building a **three-phase anomaly-based IDS** that learns only from normal benign
-traffic and flags any deviation as a potential intrusion.
+Traditional Intrusion Detection Systems (IDS) rely on signature matching, rendering them blind to zero-day vulnerabilities. This project implements a robust, multi-phase anomaly detection system that learns *exclusively* from benign network traffic. By establishing a comprehensive profile of "normal" behavior, the system can flag novel, unseen cyber-attacks simply as statistical or temporal deviations from the norm.
 
-Our methodology follows a rigorous academic ablation roadmap. Phase 1 establishes a classical
-machine learning baseline (Model A — GMM) evaluated on the widely-used CICIDS-2017 benchmark.
-Phase 2 introduces a deep sequential representation learner (Model B — LSTM-AE / Transformer-AE),
-and Phase 3 will combine both into a hybrid ensemble (Model C).
+---
 
-## Team
+## 🧠 Architecture Overview
 
-| Name | Role |
-|------|------|
-| Yash L. | EDA, preprocessing pipeline, DL architecture, report |
-| Rishabh | Model training, evaluation, ablation study |
+The system operates in a three-phase pipeline, culminating in a highly accurate hybrid detector:
 
-## Repository Structure
+1. **Phase 1: Statistical Baseline (GMM)**
+   Establishes a classical Machine Learning baseline using a full-covariance Gaussian Mixture Model (GMM). It clusters normal traffic regimes to isolate malicious deviations at the individual flow level.
 
-```
-sem6-aml-dl-project/
-├── README.md
-├── requirements.txt
-├── .gitignore
-│
-├── data/
-│   └── README.md                        # Download instructions for CICIDS-2017
-│
-├── notebooks/
-│   ├── stage1_eda.ipynb                 # EDA: 10 plots, class distribution
-│   ├── stage2_preprocessing.ipynb       # Feature engineering, scaling, correlation removal
-│   ├── stage3_models.ipynb              # Model A: IF / OCSVM / GMM training & selection
-│   ├── stage4_phase2_architecture.ipynb # Phase 2 theory: LSTM gates, attention, sequence design
-│   ├── stage5_lstm_ae.ipynb             # LSTM-AE training, evaluation, per-attack analysis
-│   └── stage6_transformer_ae.ipynb      # Transformer-AE, head-to-head, ablation study
-│
-├── scripts/
-│   └── run_ablation.py                  # Laptop-safe ablation script (chunked inference)
-│
-├── src/
-│   ├── __init__.py
-│   ├── features.py                      # FeatureEngineer class (5-stage pipeline)
-│   ├── models.py                        # AnomalyDetector base + IF / OCSVM / GMM / LSTMAEDetector
-│   └── evaluate.py                      # Evaluation utilities and plot generators
-│
-├── models/
-│   ├── model_a_gmm.pkl                  # Phase 1 GMM (K=12, full covariance)
-│   ├── model_a_threshold.npy            # GMM decision threshold τ
-│   ├── lstm_ae_best.keras               # LSTM-AE best checkpoint (262,978 params)
-│   ├── lstm_ae_threshold.npy            # LSTM-AE anomaly threshold
-│   ├── transformer_ae_best.keras        # Transformer-AE best checkpoint
-│   ├── model_b_final.keras              # Selected Model B (winner of head-to-head)
-│   └── model_b_threshold.npy            # Model B decision threshold
-│
-├── outputs/
-│   ├── eda/                             # 10 EDA plots
-│   ├── preprocessing/                   # X_train.npy, X_test.npy, y_test.npy, scalers
-│   ├── sequences/                       # X_train_seq.npy (121464,50,34), X_test_seq.npy
-│   └── models/                          # All model analysis plots
-│
-├── results/
-│   ├── model_a_metrics.csv              # Phase 1: Baseline, IF, OCSVM, GMM metrics
-│   ├── lstm_ae_metrics.csv              # LSTM-AE detailed metrics
-│   ├── transformer_ae_metrics.csv       # Transformer-AE metrics
-│   ├── model_b_comparison.csv           # LSTM-AE vs Transformer-AE head-to-head
-│   ├── model_b_metrics.csv              # Final Model B (winner) metrics
-│   ├── model_b_per_attack_comparison.csv
-│   ├── phase2_ablation_internal.csv     # 4-variant internal ablation table
-│   └── ablation_table_all_phases.csv    # Cross-phase ablation (Baseline→GMM→DL→Hybrid)
-│
-└── report/
-    ├── phase1_report.pdf                # Phase 1 IEEE-format report
-    └── phase2_report.tex                # Phase 2 LaTeX source (compile with pdflatex)
-```
+2. **Phase 2: Deep Sequential Learning (LSTM-AE)**
+   Introduces a deep sequential representation learner—an LSTM Autoencoder. It analyzes sequences of traffic over time to detect complex, multi-stage attacks (e.g., botnets, slow infiltrations) that are invisible at the single-flow level.
 
-## Phase 1 Results — Model A (Gaussian Mixture Model)
+3. **Phase 3: Hybrid Fusion Ensemble**
+   Combines the strengths of the GMM (flow-level anomalies) and the LSTM-AE (temporal anomalies) into a robust Random Forest meta-learner. 
+   
+   **🏆 Benchmark Performance (CICIDS-2017):** 
+   - **F1-Score:** 93.63%
+   - **AUC-ROC:** 98.66%
 
-| Model | Precision | Recall | F1-Score | AUC-ROC |
-|-------|-----------|--------|----------|---------|
-| Statistical Baseline | 52.1% | 48.3% | 50.1% | 61.2% |
-| Isolation Forest | 75.4% | 51.8% | 61.4% | 80.3% |
-| One-Class SVM | 76.8% | 74.9% | 75.9% | 87.2% |
-| **GMM (Model A)** | **88.3%** | **93.8%** | **90.97%** | **95.76%** |
+---
 
-Model A hyperparameters: `n_components=12`, `covariance_type='full'`, `threshold_percentile=11`
+## 🚀 Quick Start
 
-### Per-Attack Detection Rates (Model A — GMM)
+### Prerequisites
+- Python 3.9 or higher
+- Git
 
-| Attack Type | Total Flows | Detection Rate |
-|-------------|-------------|----------------|
-| DDoS | 128,016 | 99.9% |
-| FTP-Patator | 5,933 | 98.9% |
-| DoS Slowhttptest | 5,228 | 99.5% |
-| DoS slowloris | 5,385 | 69.3% |
-| SSH-Patator | 3,219 | 92.4% |
-| DoS Hulk | 172,849 | 93.9% |
-| DoS GoldenEye | 10,286 | 54.8% |
-| PortScan | 1,958 | 72.6% |
-| **Bot** | **1,441** | **45.2%** ← Phase 2 target |
-| **Infiltration** | **36** | **33.1%** ← Phase 2 target |
-| Web Attack - Brute Force | 1,470 | 9.9% |
-| Web Attack - XSS | 652 | 3.1% |
+### Installation
 
-## Phase 2 Results — Model B (LSTM Autoencoder)
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/r69shabh/anomaly-based-ids.git
+   cd anomaly-based-ids
+   ```
 
-| Metric | Value | Note |
-|--------|-------|------|
-| Precision | 47.0% | Permissive threshold |
-| Recall | 100.0% | All attacks detected |
-| **F1-Score** | **63.94%** | |
-| **AUC-ROC** | **52.19%** | See note below |
-| Window size | 50 flows | ~5 min at enterprise rate |
-| Latent dimension | 32 | 53× compression of 1,700-dim input |
-| Parameters | 262,978 | |
-| Inference | 0.83 ms/sequence | CPU |
+2. **(Optional but recommended) Create a virtual environment:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
-> **AUC note:** The 52.19% AUC reflects evaluation on the Phase 1 shuffled test set. Because
-> `train_test_split(shuffle=True)` was used in Phase 1, temporal ordering is destroyed and every
-> 50-flow test window contains a mix of benign and attack flows (~47% attack prevalence). Window-level
-> discrimination is therefore near-impossible by design. A temporally ordered evaluation in Phase 3
-> is expected to reveal the model's genuine discriminative capability.
+3. **Install the package and dependencies:**
+   ```bash
+   pip install -e .
+   ```
 
-## Cross-Phase Ablation Roadmap
+---
 
-| Model | Phase | Method | F1 | AUC | Status |
-|-------|-------|--------|----|-----|--------|
-| Statistical Baseline | 1 | z-score | 50.1% | 61.2% | Complete |
-| Isolation Forest | 1 | Ensemble | 61.4% | 80.3% | Complete |
-| One-Class SVM | 1 | Kernel | 75.9% | 87.2% | Complete |
-| **GMM (Model A)** | **1** | **Gaussian Mixture** | **90.97%** | **95.76%** | **Complete** |
-| LSTM-AE shuffled (Model B) | 2 | Deep Learning AE | 63.94% | 52.19% ← artefact | Complete |
-| LSTM-AE temporal (Model B) | 3 | Deep Learning AE | 60.2% | 53.22% | Complete |
-| **Hybrid RF (Model C)** | **3** | **GMM + LSTM + RF** | **93.63%** | **98.66%** | **Complete** |
+## 💻 Usage & CLI
 
-## Quick Start
+The project exposes a unified Command-Line Interface (CLI) via `main.py`.
+
+### 1. Training the Models
+Train the entire pipeline (GMM, LSTM-AE, and Hybrid models) sequentially. Model artifacts will be saved to the `models/` directory.
 
 ```bash
-git clone https://github.com/Yash121l/sem6-aml-dl-project.git
-cd sem6-aml-dl-project
-
-# Install dependencies (includes tensorflow==2.14.0)
-pip install -r requirements.txt
-
-# Download CICIDS-2017 from https://www.unb.ca/cic/datasets/ids-2017.html
-# Place CSV files in data/CICIDS2017/ (see data/README.md)
-
-# Run notebooks in order:
-jupyter notebook notebooks/stage1_eda.ipynb
+python main.py train
+```
+*(Optional)* Train specific phases only (1=GMM, 2=LSTM-AE, 3=Hybrid):
+```bash
+python main.py train --phases 1 3
 ```
 
-## Notebooks (run in order)
+### 2. Evaluating the Models
+Evaluate the saved models against the test dataset. This command calculates precision, recall, F1-scores, and generates ROC curves, confusion matrices, and score distribution plots in the `outputs/models/` directory.
 
-| Notebook | Description | Key Outputs |
-|----------|-------------|-------------|
-| `stage1_eda.ipynb` | 10 EDA plots, class distribution, t-SNE | `outputs/eda/` |
-| `stage2_preprocessing.ipynb` | Log transform, RobustScaler, feature engineering, correlation removal | `outputs/preprocessing/` |
-| `stage3_models.ipynb` | IF, OCSVM, GMM training; grid search; Model A selection | `outputs/models/`, `models/` |
-| `stage4_phase2_architecture.ipynb` | LSTM/Transformer theory, sequence construction, architecture diagrams | `outputs/sequences/` |
-| `stage5_lstm_ae.ipynb` | LSTM-AE training, evaluation, per-attack analysis, latent space | `outputs/models/` |
-| `stage6_transformer_ae.ipynb` | Transformer-AE, head-to-head comparison, ablation study | `results/` |
-
-## Key Design Decisions
-
-- **Train on benign only** — enables zero-day detection without any attack labels.
-- **GMM selected as Model A** — F1=90.97% vs 75.9% (OCSVM). Full-covariance GMM models correlated feature clusters corresponding to different traffic regimes.
-- **LSTM-AE for Phase 2** — Phase 1 GMM failed on temporal attacks (Bot 45%, Infiltration 33%). Sequence models detect patterns invisible at the individual flow level.
-- **Window W=50** — covers ~5 minutes of traffic, capturing C2 beacon intervals and multi-stage attack sequences.
-- **RobustScaler over StandardScaler** — network flow features contain extreme outliers from flood attacks. Fitted only on benign training data.
-
-## Evaluation Methodology
-
-```
-Train  : Benign flows only (1,518,344 flows) — model learns the normal distribution
-Test   : Benign + attack flows (716,092 flows) — labels used for evaluation only
-Phase 2: 121,464 training windows (W=50, stride=10), 716,043 test windows (stride=1)
+```bash
+python main.py evaluate
 ```
 
-## Phase Roadmap
+### 3. Inference / Detection
+Run the anomaly detector on brand new, raw network flow data (CSV format). The pipeline will handle feature engineering automatically.
 
-| Phase | Description | Status | Weight |
-|-------|-------------|--------|--------|
-| Phase 1 | ML baseline — Model A (GMM) | **Complete** | 30% |
-| Phase 2 | Deep Learning — Model B (LSTM-AE + Transformer-AE) | **Complete** | 30% |
-| Phase 3 | Hybrid ensemble — Model C (GMM + RF fusion) | **Complete** | 40% |
+```bash
+python main.py detect --input data/new_flows.csv --output predictions.csv
+```
 
-## Phase 3 Results — Model C (Hybrid Random Forest)
+### 4. Ablation Study
+Run the standalone script that evaluates the system's performance under various architectural ablations.
+```bash
+python main.py ablation
+```
 
-| Metric | Value | Note |
-|--------|-------|------|
-| **F1-Score** | **93.63%** | Best across all phases |
-| **AUC-ROC** | **98.66%** | +2.90pp over GMM alone |
-| Precision | 93.15% | |
-| Recall | 94.10% | |
-| False Negative Rate | 5.90% | 19,838 missed attacks |
-| False Positive Rate | 6.13% | 23,272 false alarms |
+---
 
-### Phase 3 Highlights
+## ⚙️ Configuration
 
-- **Temporal evaluation fix**: `train_test_split(shuffle=True)` in Phase 1 destroyed temporal ordering, making every test window contain ~23 attack flows (AUC ≈ 0.52). Reordering by CICIDS-2017 day structure fixes this.
-- **Fusion**: GMM and LSTM-AE scores normalised to [0,1] (val-set calibrated), then fused via Random Forest meta-learner trained on val benign + 20% stratified test.
-- **LR surrogate**: s_C = σ(-4.67 + 137.45·s_GMM + 2.26·s_LSTM) — GMM dominates 60.8× over LSTM-AE, consistent with AUC 95.76% vs 53.22%.
-- **Concept drift**: Page-Hinckley test (λ=50) monitors GMM log-likelihood stream. O(1) per flow. Detected 1 drift event at flow 379,600 (FTP-Patator onset).
+All hyperparameters, file paths, and model settings are centralized in `configs/default.yaml`. You do not need to modify the source code to tune the models.
 
-### Hybrid Ablation
+To use a custom configuration file:
+```bash
+python main.py train --config configs/custom_experiment.yaml
+```
 
-| Variant | F1 | AUC |
-|---------|-----|-----|
-| Full Hybrid RF (Model C) | **93.63%** | **98.66%** |
-| GMM only | 74.4% | 95.76% |
-| LSTM only | 60.2% | 53.22% |
-| Equal weight (α=0.5) | 63.9% | 56.75% |
+---
 
-Removing GMM costs -33.4pp F1 (dominant component). Removing LSTM costs -19.2pp F1 (complementary signal for borderline GMM flows).
+## 📁 Project Structure
 
-### Phase 3 New Files
+```text
+anomaly-based-ids/
+├── anomaly_ids/           # Core Python package
+│   ├── features.py        # Feature engineering pipeline
+│   ├── models.py          # Model definitions (GMM, LSTM-AE, Hybrid)
+│   ├── evaluate.py        # Evaluation metrics and plotting utils
+│   └── utils.py           # Logging, config loading, and seeding
+│
+├── pipelines/             # Executable workflows
+│   ├── train.py           # End-to-end training pipeline
+│   ├── evaluate.py        # Evaluation pipeline
+│   └── detect.py          # Inference/detection pipeline
+│
+├── configs/               # YAML configuration files
+│   └── default.yaml       
+│
+├── tests/                 # Unit tests (pytest)
+│
+├── data/                  # Raw dataset directory
+├── models/                # Saved model artifacts (.pkl, .keras)
+├── outputs/               # Generated plots, arrays, and intermediate data
+├── results/               # Metrics and CSV reports
+│
+├── main.py                # Unified CLI entrypoint
+└── setup.py               # Package installation script
+```
 
-| Path | Description |
-|------|-------------|
-| `notebooks/stage7_phase3_temporal.ipynb` | Temporal reordering + score extraction |
-| `notebooks/stage8_phase3_hybrid.ipynb` | Three fusion methods + Model C training |
-| `notebooks/stage9_phase3_ablation.ipynb` | Ablation tables + architecture diagram |
-| `models/model_c_meta_lr.pkl` | LR meta-learner (interpretable surrogate) |
-| `models/concept_drift_detector.pkl` | Page-Hinckley drift detector |
-| `outputs/phase3/` | 22 arrays + 8 plots |
-| `results/ablation_table_complete_all_phases.csv` | 7-row cross-phase ablation |
-| `results/phase3_hybrid_ablation.csv` | 4-row hybrid ablation |
-| `results/failure_analysis_per_attack.csv` | Per-attack FN/FP breakdown |
-| `report/phase3_report.tex` | IEEE-format LaTeX report |
-| `presentation/all_phase3.md` | 10-slide presentation content |
-| `src/models.py` | + HybridDetector class |
+---
 
-## References
+## 🧪 Testing
 
-1. Sharafaldin, I., Lashkari, A. H., & Ghorbani, A. A. (2018). Toward Generating a New Intrusion Detection Dataset. *ICISSP 2018*.
-2. Liu, F. T., Ting, K. M., & Zhou, Z.-H. (2008). Isolation Forest. *ICDM 2008*.
-3. Schölkopf, B. et al. (2001). Estimating the support of a high-dimensional distribution. *Neural Computation*.
-4. Bishop, C. M. (2006). *Pattern Recognition and Machine Learning*. Springer.
-5. Hochreiter, S., & Schmidhuber, J. (1997). Long short-term memory. *Neural Computation, 9*(8).
-6. Vaswani, A. et al. (2017). Attention is all you need. *NeurIPS 2017*.
-7. Mirsky, Y. et al. (2018). Kitsune: An ensemble of autoencoders for online network intrusion detection. *NDSS 2018*.
-8. Zong, B. et al. (2018). Deep autoencoding Gaussian mixture model for unsupervised anomaly detection. *ICLR 2018*.
+The project uses `pytest` for unit testing. To run the test suite and ensure all core components (features, models, evaluation) are functioning correctly:
+
+```bash
+pytest tests/ -v
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
