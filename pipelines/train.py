@@ -3,14 +3,18 @@ pipelines/train.py
 ==================
 End-to-end training pipeline for all three model phases.
 
-Trains GMM (Phase 1), LSTM-AE (Phase 2), and Hybrid RF (Phase 3) in sequence.
-Saves all model artifacts and metrics CSVs.
+Phase 1: Isolation Forest, OC-SVM, GMM baselines (flow level).
+Phase 2: configurable sequence detector (LSTM-AE / Transformer-AE / USAD),
+         trained on benign-only sliding windows built internally; evaluated
+         at FLOW level via per-timestep error mapping.
+Phase 3: leak-free fusion — isotonic calibration + CV-selected meta-learner,
+         fitted exclusively on the meta-fit split; metrics on eval-only.
 
 Usage
 -----
+    python main.py preprocess
     python main.py train
-    python main.py train --config configs/default.yaml
-    python pipelines/train.py                          # direct run
+    python main.py train --phases 1 3
 """
 
 from __future__ import annotations
@@ -24,18 +28,14 @@ import joblib
 import numpy as np
 import pandas as pd
 
-# ── allow direct execution from project root ──────────────────────────────────
 ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from deepguard.evaluate import compute_metrics
-from deepguard.models import (
-    GMMDetector,
-    HybridDetector,
-    IsolationForestDetector,
-    LSTMAEDetector,
-    OCSVMDetector,
-)
+from deepguard.fusion import FusionModel, WeightedAverageClassifier, select_meta_learner
+from deepguard.models import GMMDetector, IsolationForestDetector, OCSVMDetector
+from deepguard.models_deep import create_detector, load_detector
+from deepguard.sequences import build_eval_windows, build_train_windows, window_labels_from_flows
 from deepguard.utils import (
     ensure_dirs,
     labeled_holdout_split,
@@ -46,8 +46,13 @@ from deepguard.utils import (
 
 logger = setup_logging()
 
+SEQ_MODEL_CONFIG_KEYS = {
+    "lstm_ae": ("lstm_ae", ["window_size", "latent_dim", "dropout_rate", "lr", "threshold_pct"]),
+    "transformer_ae": ("transformer_ae", ["window_size", "d_model", "num_heads",
+                                          "latent_dim", "dropout_rate", "lr", "threshold_pct"]),
+    "usad": ("usad", ["window_size", "hidden_dim", "latent_dim", "alpha", "lr", "threshold_pct"]),
+}
 
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _load_arrays(prep_dir: pathlib.Path):
     """Load preprocessed numpy arrays from outputs/preprocessing/."""
@@ -57,19 +62,6 @@ def _load_arrays(prep_dir: pathlib.Path):
     y_test  = np.load(prep_dir / "y_test.npy")
     logger.info(f"  X_train : {X_train.shape}  |  X_test : {X_test.shape}  |  y_test : {y_test.shape}")
     return X_train, X_test, y_test
-
-
-def _load_sequences(seq_dir: pathlib.Path):
-    """Load pre-built sequence arrays for LSTM-AE training."""
-    logger.info(f"Loading sequence arrays from {seq_dir}")
-    X_train_seq = np.load(seq_dir / "X_train_seq.npy", mmap_mode="r")
-    X_test_seq  = np.load(seq_dir / "X_test_seq.npy",  mmap_mode="r")
-    y_test_seq  = np.load(seq_dir / "y_test_seq.npy")
-    logger.info(
-        f"  X_train_seq : {X_train_seq.shape}  |  "
-        f"X_test_seq : {X_test_seq.shape}  |  y_test_seq : {y_test_seq.shape}"
-    )
-    return X_train_seq, X_test_seq, y_test_seq
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -86,7 +78,6 @@ def train_phase1(cfg: dict, X_train: np.ndarray, X_test: np.ndarray, y_test: np.
 
     rows = []
 
-    # ── Isolation Forest ──────────────────────────────────────────────────────
     logger.info("Training Isolation Forest …")
     t0 = time.time()
     if_cfg = cfg.get("isolation_forest", {})
@@ -97,10 +88,9 @@ def train_phase1(cfg: dict, X_train: np.ndarray, X_test: np.ndarray, y_test: np.
     )
     ifd.fit(X_train)
     m = ifd.evaluate(X_test, y_test)
-    logger.info(f"  IF   F1={m['f1']:.4f}  AUC={m['auc_roc']:.4f}  [{time.time()-t0:.1f}s]")
+    logger.info(f"  IF   F1={m['f1']:.4f}  AUC={m['auc_roc']:.4f}  PR={m['pr_auc']:.4f}  [{time.time()-t0:.1f}s]")
     rows.append({"Model": "Isolation Forest", **m})
 
-    # ── One-Class SVM ─────────────────────────────────────────────────────────
     logger.info("Training One-Class SVM …")
     t0 = time.time()
     ocsvm_cfg = cfg.get("ocsvm", {})
@@ -112,10 +102,9 @@ def train_phase1(cfg: dict, X_train: np.ndarray, X_test: np.ndarray, y_test: np.
     )
     ocd.fit(X_train)
     m = ocd.evaluate(X_test, y_test)
-    logger.info(f"  OCSVM F1={m['f1']:.4f}  AUC={m['auc_roc']:.4f}  [{time.time()-t0:.1f}s]")
+    logger.info(f"  OCSVM F1={m['f1']:.4f}  AUC={m['auc_roc']:.4f}  PR={m['pr_auc']:.4f}  [{time.time()-t0:.1f}s]")
     rows.append({"Model": "One-Class SVM", **m})
 
-    # ── GMM (Model A) ─────────────────────────────────────────────────────────
     logger.info("Training Gaussian Mixture Model (Model A) …")
     t0 = time.time()
     gmm_cfg = cfg.get("gmm", {})
@@ -129,10 +118,9 @@ def train_phase1(cfg: dict, X_train: np.ndarray, X_test: np.ndarray, y_test: np.
     )
     gmm.fit(X_train)
     m = gmm.evaluate(X_test, y_test)
-    logger.info(f"  GMM  F1={m['f1']:.4f}  AUC={m['auc_roc']:.4f}  [{time.time()-t0:.1f}s]")
+    logger.info(f"  GMM  F1={m['f1']:.4f}  AUC={m['auc_roc']:.4f}  PR={m['pr_auc']:.4f}  [{time.time()-t0:.1f}s]")
     rows.append({"Model": "GMM (Model A)", **m})
 
-    # ── Save ──────────────────────────────────────────────────────────────────
     gmm.save(models_dir / "model_a_gmm.pkl")
     np.save(models_dir / "model_a_threshold.npy", np.array(gmm.threshold))
 
@@ -144,193 +132,217 @@ def train_phase1(cfg: dict, X_train: np.ndarray, X_test: np.ndarray, y_test: np.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Phase 2 — LSTM Autoencoder
+# Phase 2 — Sequence detector (configurable)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def train_phase2(cfg: dict, X_train_seq: np.ndarray, X_test_seq: np.ndarray,
-                 y_test_seq: np.ndarray, models_dir: pathlib.Path,
-                 results_dir: pathlib.Path) -> LSTMAEDetector:
-    """Train LSTM Autoencoder (Model B). Save artifacts and metrics CSV."""
+def _make_seq_detector(cfg: dict):
+    """Instantiate the configured sequence detector."""
+    model_name = cfg.get("phase2", {}).get("model", "lstm_ae")
+    if model_name not in SEQ_MODEL_CONFIG_KEYS:
+        raise KeyError(
+            f"phase2.model must be one of {sorted(SEQ_MODEL_CONFIG_KEYS)}, got '{model_name}'"
+        )
+    section, keys = SEQ_MODEL_CONFIG_KEYS[model_name]
+    sec = cfg.get(section, {})
+    kwargs = {k: sec[k] for k in keys if k in sec}
+    return create_detector(model_name, **kwargs), model_name
+
+
+def _seq_windows(cfg: dict, X_train: np.ndarray):
+    """Build benign-only training windows + temporal validation tail."""
+    model_name = cfg.get("phase2", {}).get("model", "lstm_ae")
+    section = SEQ_MODEL_CONFIG_KEYS[model_name][0]
+    sec = cfg.get(section, {})
+    W = int(sec.get("window_size", 50))
+    stride = int(cfg.get("phase2", {}).get("train_stride", 5))
+    val_split = float(sec.get("val_split", 0.1))
+    max_windows = cfg.get("phase2", {}).get("max_windows")
+
+    windows = build_train_windows(X_train, window_size=W, stride=stride,
+                                  max_windows=max_windows, seed=cfg.get("seed", 42))
+    n_val = max(1, int(len(windows) * val_split)) if len(windows) > 10 else max(1, len(windows) // 5)
+    return windows[:-n_val], windows[-n_val:], W
+
+
+def train_phase2(cfg: dict, X_train: np.ndarray, X_test: np.ndarray, y_test: np.ndarray,
+                 models_dir: pathlib.Path, results_dir: pathlib.Path):
+    """
+    Train the configured sequence detector on benign-only windows.
+
+    Evaluation is FLOW-LEVEL (primary): per-timestep reconstruction errors are
+    mapped back to flows; the flow threshold is calibrated on a benign slice
+    of the training data. Window-level metrics are reported for reference.
+    """
 
     logger.info("=" * 60)
-    logger.info("PHASE 2 — LSTM Autoencoder (Model B)")
+    logger.info("PHASE 2 — Sequence anomaly detection")
     logger.info("=" * 60)
 
-    ae_cfg = cfg.get("lstm_ae", {})
-    val_split = ae_cfg.get("val_split", 0.1)
+    det, model_name = _make_seq_detector(cfg)
+    section = SEQ_MODEL_CONFIG_KEYS[model_name][0]
+    sec = cfg.get(section, {})
+    p2 = cfg.get("phase2", {})
 
-    n_val = max(1, int(len(X_train_seq) * val_split))
-    X_val_seq   = X_train_seq[-n_val:]
-    X_train_seq = X_train_seq[:-n_val]
-    logger.info(f"  Train windows : {X_train_seq.shape[0]}  |  Val windows : {X_val_seq.shape[0]}")
+    X_tr_win, X_val_win, W = _seq_windows(cfg, X_train)
+    logger.info(f"  Windows: train={len(X_tr_win):,}  val={len(X_val_win):,}  (W={W})")
 
-    lstm_ae = LSTMAEDetector(
-        window_size=ae_cfg.get("window_size", 50),
-        latent_dim=ae_cfg.get("latent_dim", 32),
-        dropout_rate=ae_cfg.get("dropout_rate", 0.2),
-    )
-
-    logger.info("Training LSTM-AE …")
     t0 = time.time()
-    lstm_ae.fit(
-        X_train_seq,
-        X_val_seq=X_val_seq,
-        epochs=ae_cfg.get("epochs", 100),
-        batch_size=ae_cfg.get("batch_size", 256),
-        patience=ae_cfg.get("patience", 10),
+    det.fit(
+        X_tr_win, X_val_seq=X_val_win,
+        epochs=int(sec.get("epochs", 100)),
+        batch_size=int(sec.get("batch_size", 256)),
+        patience=int(sec.get("patience", 10)),
     )
     logger.info(f"  Training done [{time.time()-t0:.1f}s]")
 
-    lstm_ae.set_threshold(X_val_seq, percentile=ae_cfg.get("threshold_pct", 95))
-    logger.info(f"  Decision threshold : {lstm_ae.threshold:.6f}")
+    det.set_threshold(X_val_win, percentile=float(sec.get("threshold_pct", 95)))
 
-    metrics = lstm_ae.evaluate(X_test_seq, y_test_seq)
+    # ── Flow-level evaluation (primary) ───────────────────────────────────────
+    n_cal = min(50_000, int(len(X_train) * 0.2))
+    eval_stride = int(p2.get("eval_stride", 1))
+    det.set_flow_threshold(X_train[:n_cal],
+                           percentile=float(sec.get("threshold_pct", 95)),
+                           stride=eval_stride)
+    flow_metrics = det.evaluate_flows(X_test, y_test, stride=eval_stride)
     logger.info(
-        f"  LSTM-AE  F1={metrics['f1']:.4f}  AUC={metrics['auc']:.4f}  "
-        f"Recall={metrics['recall']:.4f}"
+        f"  [{model_name}] FLOW-LEVEL  F1={flow_metrics['f1']:.4f}  "
+        f"AUC={flow_metrics['auc']:.4f}  PR-AUC={flow_metrics['pr_auc']:.4f}  "
+        f"FPR={flow_metrics['fpr']:.4f}"
     )
+
+    # ── Window-level metrics (reference) ──────────────────────────────────────
+    try:
+        windows, coverage = build_eval_windows(X_test, W, stride=max(W // 2, 1))
+        w_labels = window_labels_from_flows(y_test, coverage)
+        win_metrics = det.evaluate(windows, w_labels)
+        logger.info(
+            f"  [{model_name}] WINDOW-LEVEL (ref)  F1={win_metrics['f1']:.4f}  "
+            f"AUC={win_metrics['auc']:.4f}"
+        )
+    except Exception as e:  # noqa: BLE001 — reporting must never kill training
+        win_metrics = {}
+        logger.warning(f"  Window-level evaluation skipped: {e}")
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    lstm_ae.model.save(str(models_dir / "lstm_ae_best.keras"))
-    np.save(models_dir / "lstm_ae_threshold.npy", np.array(lstm_ae.threshold))
+    det.save(models_dir / f"{model_name}_best")
+    pd.DataFrame([{**flow_metrics, "level": "flow"},
+                  {**win_metrics, "level": "window"}]).to_csv(
+        results_dir / f"{model_name}_metrics.csv", index=False
+    )
 
-    results_csv = results_dir / "lstm_ae_metrics.csv"
-    pd.DataFrame([metrics]).to_csv(results_csv, index=False)
-    logger.info(f"Phase 2 results → {results_csv}")
-
-    return lstm_ae
+    return det, model_name
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Phase 3 — Hybrid Detector
+# Phase 3 — Leak-free calibrated fusion
 # ──────────────────────────────────────────────────────────────────────────────
 
-def train_phase3(cfg: dict, gmm: GMMDetector, lstm_ae: LSTMAEDetector,
+def train_phase3(cfg: dict, gmm: GMMDetector, seq_det, seq_model_name: str,
                  X_train: np.ndarray, X_test: np.ndarray, y_test: np.ndarray,
-                 models_dir: pathlib.Path, results_dir: pathlib.Path) -> HybridDetector:
+                 models_dir: pathlib.Path, results_dir: pathlib.Path) -> FusionModel:
     """
-    Build and evaluate Hybrid RF meta-learner (Model C) without test leakage.
+    Calibrated, CV-selected meta-fusion without test leakage.
 
-    Protocol
-    --------
-    The labeled pool (X_test, y_test) is split into two disjoint parts:
-      - meta-fit  : scores here (+ labels) train the meta-learner
-      - eval-only : NEVER seen by the meta-learner; all reported metrics
-                    and the saved evaluation mask refer to this part only.
-    Normalisation stats come from a benign calibration slice of X_train.
+    Protocol: labeled pool → disjoint meta-fit / eval-only splits. Isotonic
+    calibrators and the meta-learner see ONLY the meta-fit part; all reported
+    metrics come from eval-only.
     """
 
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.linear_model import LogisticRegression
+    from sklearn.isotonic import IsotonicRegression
 
     logger.info("=" * 60)
-    logger.info("PHASE 3 — Hybrid GMM + LSTM-AE (Model C, leak-free protocol)")
+    logger.info("PHASE 3 — Hybrid fusion (leak-free protocol)")
     logger.info("=" * 60)
 
-    hybrid_cfg = cfg.get("hybrid", {})
-    window_size = hybrid_cfg.get("window_size", 50)
-    stride      = hybrid_cfg.get("stride", 25)
-    meta_frac   = hybrid_cfg.get("meta_train_frac", 0.4)
-    seed        = cfg.get("seed", 42)
+    hy = cfg.get("hybrid", {})
+    seed = cfg.get("seed", 42)
+    seq_stride = int(cfg.get("phase2", {}).get("eval_stride", 1))
 
-    # ── Calibration scores on benign slice of X_train ────────────────────────
-    n_cal = min(50_000, int(len(X_train) * 0.2))
-    X_cal = X_train[:n_cal]
+    # ── Raw base scores over the labeled pool ─────────────────────────────────
+    logger.info("Scoring labeled pool …")
+    t0 = time.time()
+    gmm_raw = -gmm._clf.score_samples(X_test)
+    seq_raw = seq_det.score_flows(X_test, stride=seq_stride)
+    raw_pool = np.column_stack([gmm_raw, seq_raw])
+    logger.info(f"  Base scores ready [{time.time()-t0:.1f}s]")
 
-    _tmp = HybridDetector(
-        gmm_model=gmm._clf,
-        lstm_ae_model=lstm_ae.model,
-        window_size=window_size,
-        stride=stride,
+    # ── Disjoint splits ───────────────────────────────────────────────────────
+    meta_idx, eval_idx = labeled_holdout_split(
+        y_test, meta_frac=float(hy.get("meta_train_frac", 0.4)), seed=seed
     )
-    s_gmm_cal = _tmp._gmm_scores(X_cal)
-    val_gmm_min, val_gmm_max = float(s_gmm_cal.min()), float(s_gmm_cal.max())
-    s_lstm_cal = _tmp._lstm_scores(X_cal)
-    val_lstm_min, val_lstm_max = float(s_lstm_cal.min()), float(s_lstm_cal.max())
-
-    # ── Score the labeled pool ONCE, then split indices ──────────────────────
-    logger.info("Scoring labeled pool for meta-learner …")
-    hybrid_base = HybridDetector(
-        gmm_model=gmm._clf,
-        lstm_ae_model=lstm_ae.model,
-        window_size=window_size,
-        stride=stride,
-        val_gmm_min=val_gmm_min,
-        val_gmm_max=val_gmm_max,
-        val_lstm_min=val_lstm_min,
-        val_lstm_max=val_lstm_max,
-    )
-    X_meta_pool = np.column_stack([
-        hybrid_base._gmm_scores(X_test),
-        hybrid_base._lstm_scores(X_test),
-    ])
-
-    meta_idx, eval_idx = labeled_holdout_split(y_test, meta_frac=meta_frac, seed=seed)
+    y_fit = y_test[meta_idx]
     logger.info(
-        f"  Meta-fit: {len(meta_idx):,} rows ({y_test[meta_idx].mean():.2%} attacks)  |  "
-        f"Eval-only: {len(eval_idx):,} rows ({y_test[eval_idx].mean():.2%} attacks)"
+        f"  Meta-fit: {len(meta_idx):,} ({y_fit.mean():.2%} attacks)  |  "
+        f"Eval-only: {len(eval_idx):,} ({y_test[eval_idx].mean():.2%} attacks)"
     )
 
-    # ── Fit meta-learner on meta-fit part ONLY ────────────────────────────────
-    meta_type = hybrid_cfg.get("meta_learner", "rf")
-    logger.info(f"Fitting meta-learner ({meta_type}) on meta-fit split …")
-    if meta_type == "lr":
-        meta = LogisticRegression(C=1.0, max_iter=500, random_state=seed)
-    else:
-        meta = RandomForestClassifier(
-            n_estimators=hybrid_cfg.get("rf_n_estimators", 100),
-            random_state=seed, n_jobs=-1
-        )
-    meta.fit(X_meta_pool[meta_idx], y_test[meta_idx])
+    # ── Isotonic calibration fitted on meta-fit ONLY ──────────────────────────
+    def apply_cals(raw: np.ndarray) -> np.ndarray:
+        return np.column_stack([raw] + [iso.predict(raw[:, j])
+                                        for j, iso in enumerate(calibrators)])
 
-    # ── Final hybrid model (metrics computed on eval-only part) ──────────────
-    hybrid = HybridDetector(
-        gmm_model=gmm._clf,
-        lstm_ae_model=lstm_ae.model,
-        meta_learner=meta,
-        window_size=window_size,
-        stride=stride,
-        val_gmm_min=val_gmm_min,
-        val_gmm_max=val_gmm_max,
-        val_lstm_min=val_lstm_min,
-        val_lstm_max=val_lstm_max,
+    calibrators = []
+    for j in range(raw_pool.shape[1]):
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        iso.fit(raw_pool[meta_idx][:, j], y_fit)
+        calibrators.append(iso)
+
+    X_meta_fit  = apply_cals(raw_pool[meta_idx])
+    X_meta_eval = apply_cals(raw_pool[eval_idx])
+
+    # ── Candidate selection by CV inside meta-fit ─────────────────────────────
+    candidates = tuple(hy.get("candidates", ["rf", "lr", "weighted"]))
+    best_name, meta, cv_rows = select_meta_learner(
+        X_meta_fit, y_fit, candidates=candidates,
+        cv_folds=int(hy.get("cv_folds", 3)), seed=seed,
     )
-    threshold = hybrid_cfg.get("threshold", 0.5)
-    metrics   = hybrid.evaluate(
-        X_test[eval_idx], y_test[eval_idx], threshold=threshold
+    pd.DataFrame(cv_rows).to_csv(results_dir / "fusion_cv_selection.csv", index=False)
+    logger.info(f"  Meta-learner selected: {best_name} "
+                f"(CV PR-AUC {max(r['cv_pr_auc_mean'] for r in cv_rows):.4f})")
+
+    # ── Final evaluation on eval-only ─────────────────────────────────────────
+    threshold = float(hy.get("threshold", 0.5))
+    fusion = FusionModel(
+        gmm_detector=gmm, seq_detector=seq_det,
+        calibrators=calibrators, meta_learner=meta,
+        alpha=float(hy.get("alpha", 0.7)), threshold=threshold,
+        seq_stride=seq_stride,
     )
-
-    # Honest fallback comparison: simple weighted average needs no fitting
-    alpha = hybrid_cfg.get("alpha", 0.7)
-    w_scores = alpha * X_meta_pool[:, 0] + (1.0 - alpha) * X_meta_pool[:, 1]
-    w_metrics = compute_metrics(y_test[eval_idx], (w_scores[eval_idx] >= threshold).astype(int), w_scores[eval_idx])
-
+    proba = meta.predict_proba(X_meta_eval)[:, 1]
+    metrics = compute_metrics(y_test[eval_idx], (proba >= threshold).astype(int), proba)
     logger.info(
-        f"  Hybrid(meta) F1={metrics['f1']:.4f}  AUC={metrics['auc']:.4f}  "
-        f"P={metrics['precision']:.4f}  R={metrics['recall']:.4f}   [eval-only]"
-    )
-    logger.info(
-        f"  Weighted(α={alpha}) F1={w_metrics['f1']:.4f}  AUC={w_metrics['auc']:.4f}   [eval-only]"
+        f"  Fusion[{best_name}] EVAL-ONLY  F1={metrics['f1']:.4f}  "
+        f"AUC={metrics['auc_roc']:.4f}  PR-AUC={metrics['pr_auc']:.4f}  "
+        f"P={metrics['precision']:.4f}  R={metrics['recall']:.4f}"
     )
 
-    # ── Save (incl. eval mask so downstream evaluation matches this protocol) ─
-    joblib.dump(meta, models_dir / "model_c_meta_rf.pkl")
-    joblib.dump(
-        {
-            "val_gmm_min": val_gmm_min, "val_gmm_max": val_gmm_max,
-            "val_lstm_min": val_lstm_min, "val_lstm_max": val_lstm_max,
-            "window_size": window_size, "stride": stride, "threshold": threshold,
-            "meta_train_frac": meta_frac, "seed": seed,
-        },
-        models_dir / "model_c_params.pkl",
+    # Honest fallbacks on the same eval-only part
+    wac = WeightedAverageClassifier().fit(X_meta_fit, y_fit)
+    w_proba = wac.predict_proba(X_meta_eval)[:, 1]
+    w_metrics = compute_metrics(y_test[eval_idx], (w_proba >= threshold).astype(int), w_proba)
+    logger.info(
+        f"  Weighted(α={wac.alpha:.2f}) EVAL-ONLY  F1={w_metrics['f1']:.4f}  "
+        f"AUC={w_metrics['auc_roc']:.4f}  PR-AUC={w_metrics['pr_auc']:.4f}"
     )
+
+    # Single-base references
+    for j, base_name in enumerate(["gmm", seq_model_name]):
+        b_proba = X_meta_eval[:, j]
+        b_metrics = compute_metrics(y_test[eval_idx], (b_proba >= threshold).astype(int), b_proba)
+        logger.info(f"  Base[{base_name}] EVAL-ONLY  F1={b_metrics['f1']:.4f}  "
+                    f"AUC={b_metrics['auc_roc']:.4f}  PR-AUC={b_metrics['pr_auc']:.4f}")
+
+    # ── Persist ───────────────────────────────────────────────────────────────
+    fusion.save(models_dir / "model_c_fusion")
+    joblib.dump({"sequence_model": seq_model_name}, models_dir / "model_c_seq_meta.pkl")
     np.save(models_dir / "model_c_eval_mask.npy", eval_idx)
+    pd.DataFrame([
+        {"model": f"Fusion[{best_name}]", **metrics},
+        {"model": f"Weighted(α={wac.alpha:.2f})", **w_metrics},
+    ]).to_csv(results_dir / "model_c_metrics.csv", index=False)
+    logger.info(f"Phase 3 results → {results_dir / 'model_c_metrics.csv'}")
 
-    results_csv = results_dir / "model_c_metrics.csv"
-    pd.DataFrame([{**metrics, "protocol": "held-out eval split"}]).to_csv(results_csv, index=False)
-    logger.info(f"Phase 3 results → {results_csv}")
-
-    return hybrid
+    return fusion
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -338,52 +350,41 @@ def train_phase3(cfg: dict, gmm: GMMDetector, lstm_ae: LSTMAEDetector,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run(config_path: str = "configs/default.yaml", phases: list[int] | None = None) -> None:
-    """
-    Full training pipeline.
-
-    Parameters
-    ----------
-    config_path : str
-        Path to YAML config.
-    phases : list[int], optional
-        Which phases to run (default: [1, 2, 3]).
-    """
     if phases is None:
         phases = [1, 2, 3]
 
     cfg = load_config(config_path)
     set_seed(cfg.get("seed", 42))
 
-    ROOT         = pathlib.Path(__file__).parent.parent
-    prep_dir     = ROOT / cfg["paths"]["prep_dir"]
-    seq_dir      = ROOT / cfg["paths"]["seq_dir"]
-    models_dir   = ROOT / cfg["paths"]["models_dir"]
-    results_dir  = ROOT / cfg["paths"]["results_dir"]
+    root        = pathlib.Path(__file__).parent.parent
+    prep_dir    = root / cfg["paths"]["prep_dir"]
+    models_dir  = root / cfg["paths"]["models_dir"]
+    results_dir = root / cfg["paths"]["results_dir"]
     ensure_dirs(models_dir, results_dir)
 
     X_train, X_test, y_test = _load_arrays(prep_dir)
 
-    gmm     = None
-    lstm_ae = None
+    gmm = None
+    seq_det = None
+    seq_model_name = cfg.get("phase2", {}).get("model", "lstm_ae")
 
     if 1 in phases:
         gmm = train_phase1(cfg, X_train, X_test, y_test, models_dir, results_dir)
 
     if 2 in phases:
-        X_train_seq, X_test_seq, y_test_seq = _load_sequences(seq_dir)
-        lstm_ae = train_phase2(cfg, X_train_seq, X_test_seq, y_test_seq, models_dir, results_dir)
+        seq_det, seq_model_name = train_phase2(
+            cfg, X_train, X_test, y_test, models_dir, results_dir
+        )
 
     if 3 in phases:
         if gmm is None:
             logger.info("Loading saved GMM for Phase 3 …")
             gmm = GMMDetector.load(models_dir / "model_a_gmm.pkl")
-        if lstm_ae is None:
-            logger.info("Loading saved LSTM-AE for Phase 3 …")
-            import tensorflow as tf
-            lstm_ae = LSTMAEDetector()
-            lstm_ae.model     = tf.keras.models.load_model(str(models_dir / "lstm_ae_best.keras"))
-            lstm_ae.threshold = float(np.load(models_dir / "lstm_ae_threshold.npy"))
-        train_phase3(cfg, gmm, lstm_ae, X_train, X_test, y_test, models_dir, results_dir)
+        if seq_det is None:
+            logger.info(f"Loading saved sequence detector ({seq_model_name}) for Phase 3 …")
+            seq_det = load_detector(seq_model_name, models_dir / f"{seq_model_name}_best")
+        train_phase3(cfg, gmm, seq_det, seq_model_name,
+                     X_train, X_test, y_test, models_dir, results_dir)
 
     logger.info("Training complete.")
 

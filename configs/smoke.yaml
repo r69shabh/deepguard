@@ -1,0 +1,71 @@
+# Smoke-test config: tiny models for fast end-to-end verification.
+paths:
+  data_dir:        data/CICIDS2017
+  prep_dir:        outputs/preprocessing
+  models_dir:      models
+  outputs_dir:     outputs/models
+  results_dir:     results
+  logs_dir:        logs
+
+seed: 42
+
+features:
+  iqr_lower:         0.01
+  iqr_upper:         0.99
+  skew_threshold:    1.0
+  corr_threshold:    0.95
+
+gmm:
+  n_components:          2
+  covariance_type:       full
+  threshold_percentile:  10
+  n_init:                1
+  max_iter:              50
+  tune_subsample:        2000
+
+isolation_forest:
+  n_estimators:    20
+  contamination:   0.15
+  max_features:    0.5
+
+ocsvm:
+  nu:          0.2
+  kernel:      rbf
+  gamma:       0.1
+  train_cap:   1000
+
+phase2:
+  model:         lstm_ae
+  train_stride:  1
+  eval_stride:   1
+  max_windows:   null
+
+lstm_ae:
+  window_size:      8
+  latent_dim:       4
+  dropout_rate:     0.0
+  lr:               0.001
+  epochs:           3
+  batch_size:       64
+  patience:         3
+  val_split:        0.2
+  threshold_pct:    95
+
+hybrid:
+  alpha:              0.7
+  threshold:          0.5
+  meta_train_frac:    0.4
+  candidates:         [rf, lr, weighted]
+  cv_folds:           3
+
+evaluation:
+  roc_plot:         false
+  cm_plot:          false
+  score_dist_plot:  false
+  per_attack_csv:   false
+  report_txt:       false
+
+detect:
+  model:            hybrid
+  batch_size:       1024
+  output_scores:    true
