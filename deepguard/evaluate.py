@@ -27,6 +27,7 @@ import pandas as pd
 import seaborn as sns
 from sklearn.metrics import (
     auc,
+    average_precision_score,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -66,6 +67,10 @@ def compute_metrics(
         auc_roc = float(roc_auc_score(y_true, y_scores))
     except ValueError:
         auc_roc = float("nan")
+    try:
+        pr_auc = float(average_precision_score(y_true, y_scores))
+    except ValueError:
+        pr_auc = float("nan")
 
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
@@ -81,6 +86,7 @@ def compute_metrics(
         "recall": recall,
         "f1": f1,
         "auc_roc": auc_roc,
+        "pr_auc": pr_auc,
         "accuracy": accuracy,
         "tp": int(tp),
         "fp": int(fp),

@@ -31,6 +31,7 @@ import joblib
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import (
+    average_precision_score,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -127,6 +128,10 @@ class AnomalyDetector(abc.ABC):
             auc_roc = float(roc_auc_score(y_test, y_scores))
         except ValueError:
             auc_roc = float("nan")
+        try:
+            pr_auc = float(average_precision_score(y_test, y_scores))
+        except ValueError:
+            pr_auc = float("nan")
 
         cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
         tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
@@ -141,6 +146,7 @@ class AnomalyDetector(abc.ABC):
             "recall": recall,
             "f1": f1,
             "auc_roc": auc_roc,
+            "pr_auc": pr_auc,
             "tp": int(tp),
             "fp": int(fp),
             "tn": int(tn),
@@ -455,12 +461,17 @@ class LSTMAEDetector:
         window_size: int = 50,
         latent_dim: int = 32,
         dropout_rate: float = 0.2,
+        lr: float = 1e-3,
+        threshold_pct: float = 95.0,
     ) -> None:
         self.window_size   = window_size
         self.latent_dim    = latent_dim
         self.dropout_rate  = dropout_rate
+        self.lr            = lr
+        self.threshold_pct = threshold_pct
         self.model         = None
         self.threshold     = None
+        self.flow_threshold = None
         self._feature_dim  = None
 
     # ------------------------------------------------------------------
@@ -515,7 +526,7 @@ class LSTMAEDetector:
 
         self.model = KModel(inp, out, name="lstm_autoencoder")
         self.model.compile(
-            optimizer=tf.keras.optimizers.Adam(1e-3, clipnorm=1.0),
+            optimizer=tf.keras.optimizers.Adam(self.lr, clipnorm=1.0),
             loss="mse",
         )
 
@@ -556,6 +567,60 @@ class LSTMAEDetector:
             raise RuntimeError("Call fit() or load() before score().")
         X_hat = self.model.predict(X_seq, batch_size=512, verbose=0)
         return np.mean(np.square(X_seq - X_hat), axis=(1, 2))
+
+    # ------------------------------------------------------------------
+    def _per_timestep_err(self, X_seq: np.ndarray) -> np.ndarray:
+        """(n_windows, window_size) MSE reduced over the feature axis."""
+        if self.model is None:
+            raise RuntimeError("Call fit() or load() before scoring.")
+        X = np.asarray(X_seq, dtype=np.float32)
+        X_hat = self.model.predict(X, batch_size=512, verbose=0)
+        return np.mean(np.square(X - X_hat), axis=2)
+
+    def score_flows(self, X: np.ndarray, stride: int = 1) -> np.ndarray:
+        """
+        Flow-level anomaly scores via per-timestep reconstruction error.
+
+        Windows are built over the flow pool; each timestep's error is mapped
+        back to its flow and averaged across all covering windows. Avoids the
+        whole-window-MSE dilution that hid isolated anomalous flows.
+        """
+        from deepguard.sequences import build_eval_windows, scatter_window_errors_to_flows
+
+        windows, coverage = build_eval_windows(np.asarray(X), self.window_size, stride)
+        errs = self._per_timestep_err(windows)
+        return scatter_window_errors_to_flows(errs, coverage, len(X))
+
+    def set_flow_threshold(self, X_benign: np.ndarray, percentile: float = 95,
+                           stride: int = 1) -> float:
+        """Calibrate the flow-level threshold on benign calibration flows."""
+        s = self.score_flows(X_benign, stride=stride)
+        self.flow_threshold = float(np.percentile(s, percentile))
+        return self.flow_threshold
+
+    def predict_flows(self, X: np.ndarray, stride: int = 1) -> np.ndarray:
+        if self.flow_threshold is None:
+            raise RuntimeError("Set flow_threshold via set_flow_threshold() first.")
+        return (self.score_flows(X, stride=stride) > self.flow_threshold).astype(int)
+
+    def evaluate_flows(self, X: np.ndarray, y_flow: np.ndarray,
+                       stride: int = 1) -> Dict[str, float]:
+        """Flow-level metrics using the calibrated flow threshold."""
+        scores = self.score_flows(X, stride=stride)
+        y_pred = (scores > self.flow_threshold).astype(int)
+        cm = confusion_matrix(y_flow, y_pred, labels=[0, 1])
+        tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+        n_neg, n_pos = tn + fp, tp + fn
+        return {
+            "precision": float(precision_score(y_flow, y_pred, zero_division=0)),
+            "recall": float(recall_score(y_flow, y_pred, zero_division=0)),
+            "f1": float(f1_score(y_flow, y_pred, zero_division=0)),
+            "auc": float(roc_auc_score(y_flow, scores)),
+            "pr_auc": float(average_precision_score(y_flow, scores)),
+            "fpr": fp / n_neg if n_neg else 0.0,
+            "fnr": fn / n_pos if n_pos else 0.0,
+            "flow_threshold": self.flow_threshold,
+        }
 
     # ------------------------------------------------------------------
     def predict(self, X_seq: np.ndarray) -> np.ndarray:
@@ -607,6 +672,7 @@ class LSTMAEDetector:
             "recall":    float(recall_score(y_seq, y_pred, zero_division=0)),
             "f1":        float(f1_score(y_seq, y_pred, zero_division=0)),
             "auc":       float(roc_auc_score(y_seq, scores)),
+            "pr_auc":    float(average_precision_score(y_seq, scores)),
             "threshold": self.threshold,
         }
 
@@ -808,6 +874,7 @@ class HybridDetector:
             "recall":    float(recall_score(y, y_pred, zero_division=0)),
             "f1":        float(f1_score(y, y_pred, zero_division=0)),
             "auc":       float(roc_auc_score(y, scores)),
+            "pr_auc":    float(average_precision_score(y, scores)),
             "fpr":       fp / n_neg if n_neg > 0 else 0.0,
             "fnr":       fn / n_pos if n_pos > 0 else 0.0,
             "tp": int(tp), "fp": int(fp), "tn": int(tn), "fn": int(fn),
