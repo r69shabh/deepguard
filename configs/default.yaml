@@ -72,6 +72,8 @@ hybrid:
   meta_learner:       rf         # 'rf' | 'lr' | 'weighted'
   rf_n_estimators:    100
   threshold:          0.5
+  meta_train_frac:    0.4        # fraction of labeled pool used to FIT the meta-learner;
+                                 # metrics are reported on the remaining held-out part only
 
 # ─────────────────────────────────────────────────────────────
 # Evaluation
