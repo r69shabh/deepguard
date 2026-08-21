@@ -16,9 +16,7 @@ Usage
 import argparse
 import sys
 
-from pipelines import train
-from pipelines import evaluate
-from pipelines import detect
+from pipelines import detect, evaluate, preprocess, train
 
 
 def main():
@@ -27,6 +25,17 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
+
+    # ── Preprocess Command ────────────────────────────────────────────────────
+    prep_parser = subparsers.add_parser(
+        "preprocess", help="Raw CICIDS-2017 CSVs → model-ready arrays"
+    )
+    prep_parser.add_argument(
+        "--config", default="configs/default.yaml", help="Path to configuration file"
+    )
+    prep_parser.add_argument(
+        "--data-dir", default=None, help="Directory containing raw dataset CSVs"
+    )
 
     # ── Train Command ────────────────────────────────────────────────────────
     train_parser = subparsers.add_parser("train", help="Train the anomaly detection models")
@@ -57,11 +66,13 @@ def main():
     )
 
     # ── Ablation Command (Optional hook to existing script) ──────────────────
-    ablation_parser = subparsers.add_parser("ablation", help="Run the full ablation study")
+    subparsers.add_parser("ablation", help="Run the full ablation study")
 
     args = parser.parse_args()
 
-    if args.command == "train":
+    if args.command == "preprocess":
+        preprocess.run(data_dir=args.data_dir, config_path=args.config)
+    elif args.command == "train":
         train.run(config_path=args.config, phases=args.phases)
     elif args.command == "evaluate":
         evaluate.run(config_path=args.config)
