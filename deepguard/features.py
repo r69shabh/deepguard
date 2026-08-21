@@ -20,11 +20,11 @@ Usage
 
 from __future__ import annotations
 
+import pathlib
+from typing import List, Optional, Union
+
 import numpy as np
 import pandas as pd
-from typing import List, Optional
-import warnings
-
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 IQR_LOWER_QUANTILE = 0.01
@@ -75,6 +75,7 @@ class FeatureEngineer:
         self._lower_caps: Optional[np.ndarray] = None
         self._upper_caps: Optional[np.ndarray] = None
         self._log_mask: Optional[np.ndarray] = None
+        self._train_medians: Optional[pd.Series] = None
         self._robust_median: Optional[np.ndarray] = None
         self._robust_iqr: Optional[np.ndarray] = None
         self._drop_columns: Optional[List[str]] = None
@@ -111,8 +112,12 @@ class FeatureEngineer:
         X = X_benign.copy()
         self._raw_feature_names = list(X.columns)
 
-        # Step 1: Remove infinities → NaN, then drop NaN rows for fitting
+        # Step 1: Remove infinities → NaN, then drop NaN rows for fitting.
+        # Medians for test-time imputation are computed BEFORE dropping rows,
+        # so transform() never needs statistics from the incoming batch
+        # (deterministic, leakage-free serving behaviour).
         X = X.replace([np.inf, -np.inf], np.nan)
+        self._train_medians = X.median(numeric_only=True)
         X = X.dropna()
 
         # Step 2: IQR outlier capping boundaries
@@ -165,11 +170,13 @@ class FeatureEngineer:
         self._check_fitted()
         X = X.copy()
 
-        # Step 1: Inf → NaN fill (use column median rather than dropping rows)
+        # Step 1: Inf → NaN, then impute with *training* medians (not batch
+        # medians — those would vary per request and constitute serving skew)
         X = X.replace([np.inf, -np.inf], np.nan)
         for col in X.columns:
             if X[col].isna().any():
-                X[col] = X[col].fillna(X[col].median())
+                fill = self._train_medians.get(col, X[col].median())
+                X[col] = X[col].fillna(fill)
 
         # Step 2: Outlier capping
         X_capped = self._apply_caps(X)
@@ -207,10 +214,44 @@ class FeatureEngineer:
         Returns
         -------
         list[str]
-            Feature names after all engineering and selection steps.
         """
         self._check_fitted()
         return list(self.feature_names_)
+
+    def save(self, path: Union[str, pathlib.Path]) -> None:
+        """
+        Persist the fully fitted FeatureEngineer (all learned statistics).
+
+        Parameters
+        ----------
+        path : str or Path — target *.pkl file.
+        """
+        import joblib
+
+        self._check_fitted()
+        path = pathlib.Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self, path)
+
+    @classmethod
+    def load(cls, path: Union[str, pathlib.Path]) -> "FeatureEngineer":
+        """
+        Load a fitted FeatureEngineer previously written by save().
+
+        Parameters
+        ----------
+        path : str or Path
+
+        Returns
+        -------
+        FeatureEngineer (fitted)
+        """
+        import joblib
+
+        obj = joblib.load(path)
+        if not isinstance(obj, cls):
+            raise TypeError(f"{path} does not contain a FeatureEngineer.")
+        return obj
 
     # ──────────────────────────────────────────────────────────────────────────
     # Internal helpers
@@ -219,13 +260,13 @@ class FeatureEngineer:
     def _apply_caps(self, X: pd.DataFrame) -> pd.DataFrame:
         """Clip each column to [lower_cap, upper_cap] learned from training."""
         X_capped = X.copy()
-        for i, col in enumerate(self._raw_feature_names):
-            if col in X_capped.columns:
-                col_idx = list(self._raw_feature_names).index(col)
-                X_capped[col] = X_capped[col].clip(
-                    self._lower_caps[col_idx],
-                    self._upper_caps[col_idx]
-                )
+        cap_map = {
+            col: (self._lower_caps[i], self._upper_caps[i])
+            for i, col in enumerate(self._raw_feature_names)
+            if col in X_capped.columns
+        }
+        for col, (lo, hi) in cap_map.items():
+            X_capped[col] = X_capped[col].clip(lo, hi)
         return X_capped
 
     def _engineer_features(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -324,7 +365,6 @@ class FeatureEngineer:
 # Smoke test
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import os
     import pathlib
 
     ROOT = pathlib.Path(__file__).parent.parent
