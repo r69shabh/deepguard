@@ -19,6 +19,9 @@ setup(
         "pyyaml>=6.0",
         "pytest>=7.4.0",
     ],
+    extras_require={
+        "dev": ["ruff>=0.4", "pytest-cov>=5.0"],
+    },
     entry_points={
         "console_scripts": [
             "deepguard=main:main",

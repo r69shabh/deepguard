@@ -1,0 +1,18 @@
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["notebooks", "outputs", "venv", "models", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+# E501 handled by formatter where possible; long report strings tolerated
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# pipelines/scripts insert the repo root on sys.path before project imports
+"pipelines/*.py" = ["E402"]
+"scripts/*.py" = ["E402", "E702"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

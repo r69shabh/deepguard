@@ -52,14 +52,27 @@ The system operates in a three-phase pipeline, culminating in a highly accurate 
 
 3. **Install the package and dependencies:**
    ```bash
-   pip install -e .
+   pip install -e ".[dev]"
    ```
+
+4. **Get the dataset** (not included — see `data/README.md`):
+   Download CICIDS-2017 from https://www.unb.ca/cic/datasets/ids-2017.html and place all 8 CSVs in `data/CICIDS2017/`.
 
 ---
 
 ## 💻 Usage & CLI
 
 The project exposes a unified Command-Line Interface (CLI) via `main.py`.
+
+### 0. Preprocessing (raw CSVs → model-ready arrays)
+Cleans the raw CICIDS-2017 flows (metadata drops, inf→median imputation with benign-only statistics, duplicate removal), builds the one-class split (benign-only train / mixed test), fits the `FeatureEngineer`, and writes all arrays plus `feature_engineer.pkl` to `outputs/preprocessing/`.
+
+```bash
+python main.py preprocess
+```
+> **Note:** training and inference both require this step. The fitted
+> `FeatureEngineer` is persisted so that `detect` applies *identical*
+> preprocessing at serving time.
 
 ### 1. Training the Models
 Train the entire pipeline (GMM, LSTM-AE, and Hybrid models) sequentially. Model artifacts will be saved to the `models/` directory.
@@ -78,6 +91,12 @@ Evaluate the saved models against the test dataset. This command calculates prec
 ```bash
 python main.py evaluate
 ```
+
+> **Evaluation protocol (leak-free):** the hybrid meta-learner is fitted only on a
+> disjoint meta-fit slice of the labeled pool (`hybrid.meta_train_frac`, default 0.4);
+> all reported metrics come from the remaining held-out rows (`models/model_c_eval_mask.npy`).
+> Earlier versions of this project trained the meta-learner on the test set itself,
+> which inflated reported scores — treat pre-2026 numbers as invalid.
 
 ### 3. Inference / Detection
 Run the anomaly detector on brand new, raw network flow data (CSV format). The pipeline will handle feature engineering automatically.
@@ -110,12 +129,14 @@ python main.py train --config configs/custom_experiment.yaml
 ```text
 deepguard/
 ├── deepguard/           # Core Python package
-│   ├── features.py        # Feature engineering pipeline
+│   ├── features.py        # Feature engineering pipeline (fit/transform + persistence)
+│   ├── data_loaders.py    # Raw CICIDS-2017 ingestion and cleaning
 │   ├── models.py          # Model definitions (GMM, LSTM-AE, Hybrid)
 │   ├── evaluate.py        # Evaluation metrics and plotting utils
-│   └── utils.py           # Logging, config loading, and seeding
+│   └── utils.py           # Logging, config loading, seeding, split helpers
 │
 ├── pipelines/             # Executable workflows
+│   ├── preprocess.py      # Raw CSVs → model-ready arrays
 │   ├── train.py           # End-to-end training pipeline
 │   ├── evaluate.py        # Evaluation pipeline
 │   └── detect.py          # Inference/detection pipeline

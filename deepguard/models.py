@@ -25,23 +25,20 @@ from __future__ import annotations
 
 import abc
 import pathlib
-from typing import Any, Dict, Optional, Union
+from typing import Dict, Optional, Union
 
 import joblib
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import (
-    auc,
     confusion_matrix,
     f1_score,
     precision_score,
     recall_score,
     roc_auc_score,
-    roc_curve,
 )
 from sklearn.mixture import GaussianMixture
 from sklearn.svm import OneClassSVM
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Base class
@@ -485,11 +482,16 @@ class LSTMAEDetector:
         X_val_seq : optional validation sequences for early stopping.
         """
         import tensorflow as tf
-        from tensorflow.keras.models import Model as KModel
-        from tensorflow.keras.layers import (
-            Input, LSTM, Dense, Dropout, RepeatVector, TimeDistributed,
-        )
         from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+        from tensorflow.keras.layers import (
+            LSTM,
+            Dense,
+            Dropout,
+            Input,
+            RepeatVector,
+            TimeDistributed,
+        )
+        from tensorflow.keras.models import Model as KModel
 
         tf.random.set_seed(42)
         self._feature_dim = X_train_seq.shape[2]
@@ -874,7 +876,6 @@ class HybridDetector:
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import pathlib
-    import tempfile
 
     ROOT = pathlib.Path(__file__).parent.parent
     prep = ROOT / "outputs" / "preprocessing"
