@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from deepguard.models import LSTMAEDetector
-import tensorflow as tf
+tf = pytest.importorskip("tensorflow")
 
 @pytest.fixture
 def seq_data():

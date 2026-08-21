@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 from deepguard.models import HybridDetector, GMMDetector, LSTMAEDetector
-import tensorflow as tf
+tf = pytest.importorskip("tensorflow")
 from sklearn.ensemble import RandomForestClassifier
 
 @pytest.fixture
@@ -35,15 +35,15 @@ def test_hybrid_score(dummy_hybrid):
     assert scores.shape == (50,)
     assert not np.isnan(scores).any()
 
-def test_hybrid_predict_no_threshold(dummy_hybrid):
+def test_hybrid_predict_with_explicit_threshold(dummy_hybrid):
     X = np.random.randn(50, 5).astype(np.float32)
-    with pytest.raises(RuntimeError):
-        dummy_hybrid.predict(X)
-        
-def test_hybrid_set_threshold(dummy_hybrid):
-    X = np.random.randn(50, 5).astype(np.float32)
-    dummy_hybrid.set_threshold(X, percentile=90)
-    assert dummy_hybrid.threshold is not None
-    preds = dummy_hybrid.predict(X)
+    preds = dummy_hybrid.predict(X, threshold=0.5)
     assert preds.shape == (50,)
     assert set(np.unique(preds)).issubset({0, 1})
+
+def test_hybrid_evaluate(dummy_hybrid):
+    X = np.random.randn(50, 5).astype(np.float32)
+    y = np.random.randint(0, 2, 50)
+    metrics = dummy_hybrid.evaluate(X, y, threshold=0.5)
+    assert 0.0 <= metrics["f1"] <= 1.0
+    assert 0.0 <= metrics["auc"] <= 1.0
