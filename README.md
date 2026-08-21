@@ -18,15 +18,18 @@ The system operates in a three-phase pipeline, culminating in a highly accurate 
 1. **Phase 1: Statistical Baseline (GMM)**
    Establishes a classical Machine Learning baseline using a full-covariance Gaussian Mixture Model (GMM). It clusters normal traffic regimes to isolate malicious deviations at the individual flow level.
 
-2. **Phase 2: Deep Sequential Learning (LSTM-AE)**
-   Introduces a deep sequential representation learner—an LSTM Autoencoder. It analyzes sequences of traffic over time to detect complex, multi-stage attacks (e.g., botnets, slow infiltrations) that are invisible at the single-flow level.
-
-3. **Phase 3: Hybrid Fusion Ensemble**
-   Combines the strengths of the GMM (flow-level anomalies) and the LSTM-AE (temporal anomalies) into a robust Random Forest meta-learner. 
+2. **Phase 2: Deep Sequential Learning (configurable)**
+   A deep sequence model learns temporal representations over sliding windows of benign traffic. Pick the architecture in `configs/default.yaml` (`phase2.model`):
+   - `lstm_ae` — LSTM Autoencoder
+   - `transformer_ae` — attention encoder-decoder with positional encoding
+   - `usad` — adversarial autoencoder (USAD, KDD'20)
    
-   **🏆 Benchmark Performance (CICIDS-2017):** 
-   - **F1-Score:** 93.63%
-   - **AUC-ROC:** 98.66%
+   Anomaly scores are computed at **flow level**: per-timestep reconstruction errors are mapped back to individual flows, avoiding the whole-window dilution that hides isolated attacks. A flow-level **Deep SVDD** baseline is also available.
+
+3. **Phase 3: Calibrated Fusion Ensemble (leak-free)**
+   Combines GMM flow-density scores and sequence-model flow scores through per-score isotonic calibration and a meta-learner selected by cross-validation (RF / LR / weighted-average) on PR-AUC.
+   
+   **Evaluation protocol:** calibrators and the meta-learner are fitted exclusively on a disjoint *meta-fit* split; all reported metrics come from the held-out *eval-only* split.
 
 ---
 
@@ -75,14 +78,19 @@ python main.py preprocess
 > preprocessing at serving time.
 
 ### 1. Training the Models
-Train the entire pipeline (GMM, LSTM-AE, and Hybrid models) sequentially. Model artifacts will be saved to the `models/` directory.
+Train the entire pipeline (GMM, sequence model, and fusion) sequentially. Model artifacts will be saved to the `models/` directory.
 
 ```bash
 python main.py train
 ```
-*(Optional)* Train specific phases only (1=GMM, 2=LSTM-AE, 3=Hybrid):
+*(Optional)* Train specific phases only (1=GMM, 2=sequence model, 3=fusion):
 ```bash
 python main.py train --phases 1 3
+```
+*(Optional)* Use a different sequence architecture:
+```bash
+# edit configs/default.yaml → phase2.model: transformer_ae | usad
+python main.py train --phases 2 3
 ```
 
 ### 2. Evaluating the Models
