@@ -31,10 +31,61 @@ from deepguard.evaluate import (
     plot_roc_curve,
     plot_score_distribution,
 )
+from deepguard.metrics_ext import (
+    bootstrap_ci,
+    fpr_at_tpr,
+    per_attack_table,
+    prevalence_sweep,
+)
 from deepguard.models import GMMDetector
 from deepguard.utils import ensure_dirs, load_config, set_seed, setup_logging
 
 logger = setup_logging()
+
+
+def _rigor_block(tag: str, y: np.ndarray, scores: np.ndarray, y_pred: np.ndarray,
+                 attack_types, cfg: dict, results_dir) -> dict:
+    """Compute and persist the extended evaluation block for one scorer."""
+    ev_cfg = cfg.get("evaluation", {})
+    out: dict = {}
+
+    out["fpr_at_95tpr"] = fpr_at_tpr(y, scores,
+                                     target_tpr=float(ev_cfg.get("tpr_target", 0.95)))
+
+    n_boot = int(ev_cfg.get("bootstrap_n", 500))
+    for metric_name in ("auc_roc", "pr_auc"):
+        try:
+            if metric_name == "auc_roc":
+                from sklearn.metrics import roc_auc_score as _fn
+            else:
+                from sklearn.metrics import average_precision_score as _fn
+            ci = bootstrap_ci(y, scores, metric_fn=_fn, n_boot=n_boot,
+                              seed=cfg.get("seed", 42))
+            out[f"{metric_name}_ci95"] = f"[{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}]"
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"  Bootstrap CI failed for {metric_name}: {e}")
+
+    if attack_types is not None:
+        df_attacks = per_attack_table(y, attack_types, scores, y_pred=y_pred)
+        df_attacks.to_csv(results_dir / f"per_attack_{tag}.csv", index=False)
+        if "detection_rate" in df_attacks.columns:
+            weak = df_attacks[df_attacks["detection_rate"] < 0.5]
+            if len(weak):
+                names = ", ".join(weak.attack_type.head(5))
+                logger.info(f"  Weak spots (<50% detection): {names}")
+
+    try:
+        prevs = tuple(ev_cfg.get("prevalences", [0.20, 0.10, 0.05, 0.01]))
+        sweep = prevalence_sweep(y, scores, prevalences=prevs, seed=cfg.get("seed", 42))
+        sweep.to_csv(results_dir / f"prevalence_sweep_{tag}.csv", index=False)
+        low = sweep[sweep.prevalence == sweep.prevalence.min()]
+        if len(low):
+            r = low.iloc[0]
+            out[f"pr_auc@{r['prevalence']:.0%}"] = float(r["pr_auc"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"  Prevalence sweep failed: {e}")
+
+    return out
 
 
 def run(config_path: str = "configs/default.yaml") -> None:
@@ -51,6 +102,18 @@ def run(config_path: str = "configs/default.yaml") -> None:
     X_test = np.load(prep_dir / "X_test.npy")
     y_test = np.load(prep_dir / "y_test.npy")
 
+    attack_types = None
+    at_path = prep_dir / "attack_types.npy"
+    if at_path.exists():
+        attack_types = np.load(at_path, allow_pickle=True)
+    else:
+        logger.info("No attack_types.npy — per-attack tables will be skipped.")
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    ROOT_ = pathlib.Path(__file__).parent.parent
+    results_dir = ROOT_ / cfg["paths"]["results_dir"]
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     # 1. Evaluate GMM (Model A)
     logger.info("Evaluating GMM (Model A)...")
     metrics_gmm = None
@@ -59,6 +122,12 @@ def run(config_path: str = "configs/default.yaml") -> None:
         y_scores_gmm = gmm.score(X_test)
         y_pred_gmm   = gmm.predict(X_test)
         metrics_gmm  = compute_metrics(y_test, y_pred_gmm, y_scores_gmm)
+
+        rigor = _rigor_block("gmm", y_test, y_scores_gmm, y_pred_gmm,
+                             attack_types, cfg, results_dir)
+        metrics_gmm.update(rigor)
+        for k, v in rigor.items():
+            logger.info(f"  GMM {k}: {v}")
 
         if cfg["evaluation"].get("roc_plot"):
             plot_roc_curve(y_test, y_scores_gmm, label="GMM", save_path=outputs_dir / "gmm_roc.png")
@@ -104,6 +173,13 @@ def run(config_path: str = "configs/default.yaml") -> None:
         y_scores_h = fusion.score(X_test_h)
         y_pred_h   = (y_scores_h >= threshold).astype(int)
         metrics_h  = compute_metrics(y_test_h, y_pred_h, y_scores_h)
+
+        at_h = attack_types[eval_idx] if (attack_types is not None and mask_path.exists()) else attack_types
+        rigor_h = _rigor_block("hybrid", y_test_h, y_scores_h, y_pred_h,
+                               at_h, cfg, results_dir)
+        metrics_h.update(rigor_h)
+        for k, v in rigor_h.items():
+            logger.info(f"  Hybrid {k}: {v}")
 
         if cfg["evaluation"].get("roc_plot"):
             plot_roc_curve(y_test_h, y_scores_h, label="Hybrid", save_path=outputs_dir / "hybrid_roc.png")

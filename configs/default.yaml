@@ -132,6 +132,9 @@ evaluation:
   score_dist_plot:  true
   per_attack_csv:   true
   report_txt:       true
+  bootstrap_n:      500        # resamples for confidence intervals (0 = skip)
+  tpr_target:       0.95       # operating point for FPR@TPR metric
+  prevalences:      [0.20, 0.10, 0.05, 0.01]  # low-prevalence sweep grid
 
 # ─────────────────────────────────────────────────────────────
 # Detection (inference mode)

@@ -16,7 +16,7 @@ Usage
 import argparse
 import sys
 
-from pipelines import detect, evaluate, preprocess, train
+from pipelines import detect, evaluate, preprocess, robustness, train
 
 
 def main():
@@ -62,11 +62,27 @@ def main():
         "--output", required=True, help="Output CSV file to save predictions"
     )
     detect_parser.add_argument(
+        "--explain", action="store_true",
+        help="Add top contributing-feature columns for flagged flows",
+    )
+    detect_parser.add_argument(
         "--config", default="configs/default.yaml", help="Path to configuration file"
     )
 
     # ── Ablation Command (Optional hook to existing script) ──────────────────
     subparsers.add_parser("ablation", help="Run the full ablation study")
+
+    # ── Robustness Command ───────────────────────────────────────────────────
+    rob_parser = subparsers.add_parser(
+        "robustness", help="Mimicry-evasion and noise-FPR robustness experiments"
+    )
+    rob_parser.add_argument(
+        "--config", default="configs/default.yaml", help="Path to configuration file"
+    )
+    rob_parser.add_argument(
+        "--models", nargs="+", default=["gmm", "hybrid"],
+        choices=["gmm", "hybrid"], help="Which scorers to test",
+    )
 
     args = parser.parse_args()
 
@@ -77,7 +93,10 @@ def main():
     elif args.command == "evaluate":
         evaluate.run(config_path=args.config)
     elif args.command == "detect":
-        detect.run(input_csv=args.input, output_csv=args.output, config_path=args.config)
+        detect.run(input_csv=args.input, output_csv=args.output,
+                   config_path=args.config, explain=args.explain)
+    elif args.command == "robustness":
+        robustness.run(config_path=args.config, models=args.models)
     elif args.command == "ablation":
         # Simply execute the run_ablation script
         import subprocess

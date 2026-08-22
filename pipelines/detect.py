@@ -16,6 +16,7 @@ import sys
 import time
 
 import joblib
+import numpy as np
 import pandas as pd
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -27,7 +28,7 @@ from deepguard.utils import ensure_dirs, load_config, setup_logging
 
 logger = setup_logging()
 
-def run(input_csv: str, output_csv: str, config_path: str = "configs/default.yaml") -> None:
+def run(input_csv: str, output_csv: str, config_path: str = "configs/default.yaml", explain: bool = False) -> None:
     cfg = load_config(config_path)
 
     ROOT       = pathlib.Path(__file__).parent.parent
@@ -71,6 +72,8 @@ def run(input_csv: str, output_csv: str, config_path: str = "configs/default.yam
     logger.info(f"Running detection using {model_type.upper()}...")
 
     t0 = time.time()
+    gmm = None
+    fusion = None
     if model_type == "gmm":
         gmm = GMMDetector.load(models_dir / "model_a_gmm.pkl")
         scores = gmm.score(X)
@@ -97,6 +100,10 @@ def run(input_csv: str, output_csv: str, config_path: str = "configs/default.yam
         out_df["anomaly_score"] = scores
     out_df["is_attack"] = preds
 
+    if explain:
+        out_df = _add_explanations(out_df, X, scores, preds, fe,
+                                   model_type, gmm, fusion if model_type == "hybrid" else None)
+
     out_df.to_csv(output_csv, index=False)
     logger.info(f"Predictions saved to {output_csv}")
 
@@ -104,10 +111,52 @@ def run(input_csv: str, output_csv: str, config_path: str = "configs/default.yam
     logger.info(f"Summary: {n_attacks} attacks detected out of {len(preds)} flows ({(n_attacks/len(preds))*100:.2f}%).")
 
 
+def _add_explanations(out_df, X, scores, preds, fe, model_type, gmm, fusion) -> "pd.DataFrame":
+    """
+    Attach top-k counterfactual feature attributions for flagged flows.
+
+    Reference point: per-feature median of the processed benign training data
+    (outputs/preprocessing/X_train.npy). Skips gracefully when unavailable.
+    """
+    from deepguard.explain import explain_flow
+
+    prep_dir = pathlib.Path(__file__).parent.parent / "outputs" / "preprocessing"
+    train_path = prep_dir / "X_train.npy"
+    if not train_path.exists():
+        logger.warning("--explain requested but X_train.npy not found; skipping.")
+        return out_df
+
+    X_benign_processed = np.load(train_path)
+    reference = np.median(X_benign_processed, axis=0)
+    names = list(fe.get_feature_names())
+
+    scorer = (fusion.score if fusion is not None
+              else (lambda Z: np.asarray(gmm.score(Z))))
+
+    flagged = np.where(np.asarray(preds) == 1)[0][:500]  # bound cost
+    if len(flagged) == 0:
+        return out_df
+
+    k = 3
+    for i in range(k):
+        out_df[f"explain_top{i+1}_feature"] = ""
+        out_df[f"explain_top{i+1}_contrib"] = np.nan
+
+    logger.info(f"Explaining {len(flagged)} flagged flows …")
+    for idx in flagged:
+        expl = explain_flow(X[idx], scorer, reference, names, top_k=k)
+        for i in range(len(expl["top_features"])):
+            out_df.iloc[idx, out_df.columns.get_loc(f"explain_top{i+1}_feature")] = expl["top_features"][i]
+            out_df.iloc[idx, out_df.columns.get_loc(f"explain_top{i+1}_contrib")] = expl["contributions"][i]
+    return out_df
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run anomaly detection on new data")
     parser.add_argument("--input", required=True, help="Input CSV file with network flows")
     parser.add_argument("--output", required=True, help="Output CSV file for predictions")
     parser.add_argument("--config", default="configs/default.yaml", help="Path to YAML config")
+    parser.add_argument("--explain", action="store_true",
+                        help="Add top contributing-feature columns for flagged flows")
     args = parser.parse_args()
-    run(args.input, args.output, args.config)
+    run(args.input, args.output, args.config, explain=args.explain)
