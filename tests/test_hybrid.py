@@ -11,8 +11,8 @@ def dummy_hybrid():
     
     lstm = tf.keras.models.Sequential([
         tf.keras.layers.InputLayer(input_shape=(10, 5)),
-        tf.keras.layers.LSTM(4, return_sequences=False),
-        tf.keras.layers.Dense(50)
+        tf.keras.layers.LSTM(4, return_sequences=True),
+        tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(5)),
     ])
     
     rf = RandomForestClassifier(n_estimators=10)
