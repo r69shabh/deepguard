@@ -2,9 +2,11 @@ name: Python application
 
 on:
   push:
-    branches: [ "main", "phase0-integrity" ]
+    branches:
+      - "**"
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - "**"
 
 jobs:
   build:
