@@ -31,6 +31,18 @@ The system operates in a three-phase pipeline, culminating in a highly accurate 
    
    **Evaluation protocol:** calibrators and the meta-learner are fitted exclusively on a disjoint *meta-fit* split; all reported metrics come from the held-out *eval-only* split.
 
+4. **Phase 4: Drift Monitoring & Adaptive Retraining**
+   The system watches its own anomaly-score stream for concept drift (Page–Hinckley on scores and alert rate, bounded-memory ADWIN, windowed KS-test against the calibration baseline). On alarm it:
+   1. resets the benign replay buffer and collects *new-regime* evidence,
+   2. refits the GMM on that buffer,
+   3. accepts or rolls back the refit via validation guards (FPR/recall must not degrade; saturated guards reject premature adaptation),
+   4. re-arms all monitors with recalibrated thresholds.
+
+   ```bash
+   # simulate a covariate shift mid-stream and watch the loop react
+   python main.py monitor --inject-drift-after 150 --drift-shift 4.0
+   ```
+
 ---
 
 ## 🚀 Quick Start

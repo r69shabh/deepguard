@@ -16,7 +16,7 @@ Usage
 import argparse
 import sys
 
-from pipelines import detect, evaluate, preprocess, robustness, train
+from pipelines import detect, evaluate, monitor, preprocess, robustness, train
 
 
 def main():
@@ -84,6 +84,25 @@ def main():
         choices=["gmm", "hybrid"], help="Which scorers to test",
     )
 
+    # ── Monitor Command ──────────────────────────────────────────────────────
+    mon_parser = subparsers.add_parser(
+        "monitor", help="Streaming drift monitoring + adaptive retraining"
+    )
+    mon_parser.add_argument(
+        "--config", default="configs/default.yaml", help="Path to configuration file"
+    )
+    mon_parser.add_argument(
+        "--inject-drift-after", type=int, default=None,
+        help="Step after which a synthetic covariate shift is applied",
+    )
+    mon_parser.add_argument(
+        "--drift-shift", type=float, default=3.0,
+        help="Shift magnitude in feature-std units",
+    )
+    mon_parser.add_argument(
+        "--max-steps", type=int, default=None, help="Cap the stream length",
+    )
+
     args = parser.parse_args()
 
     if args.command == "preprocess":
@@ -97,6 +116,11 @@ def main():
                    config_path=args.config, explain=args.explain)
     elif args.command == "robustness":
         robustness.run(config_path=args.config, models=args.models)
+    elif args.command == "monitor":
+        monitor.run(config_path=args.config,
+                    inject_drift_after=args.inject_drift_after,
+                    drift_shift=args.drift_shift,
+                    max_steps=args.max_steps)
     elif args.command == "ablation":
         # Simply execute the run_ablation script
         import subprocess
