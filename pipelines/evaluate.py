@@ -31,7 +31,7 @@ from deepguard.evaluate import (
     plot_roc_curve,
     plot_score_distribution,
 )
-from deepguard.models import GMMDetector, HybridDetector, LSTMAEDetector
+from deepguard.models import GMMDetector
 from deepguard.utils import ensure_dirs, load_config, set_seed, setup_logging
 
 logger = setup_logging()
@@ -78,6 +78,9 @@ def run(config_path: str = "configs/default.yaml") -> None:
     # 2. Evaluate Hybrid (Model C) — on the held-out eval split only
     logger.info("Evaluating Hybrid Detector (Model C)...")
     try:
+        from deepguard.fusion import FusionModel
+        from deepguard.models_deep import load_detector
+
         # The meta-learner was fitted on a disjoint slice; restrict evaluation
         # to the saved eval-only indices so reported metrics stay leak-free.
         mask_path = models_dir / "model_c_eval_mask.npy"
@@ -92,27 +95,13 @@ def run(config_path: str = "configs/default.yaml") -> None:
                 "current pipeline for leak-free hybrid numbers."
             )
 
-        import tensorflow as tf
-        lstm_ae = LSTMAEDetector()
-        lstm_ae.model = tf.keras.models.load_model(str(models_dir / "lstm_ae_best.keras"))
+        gmm = GMMDetector.load(models_dir / "model_a_gmm.pkl")
+        seq_name = joblib.load(models_dir / "model_c_seq_meta.pkl")["sequence_model"]
+        seq_det = load_detector(seq_name, models_dir / f"{seq_name}_best")
+        fusion = FusionModel.load(models_dir / "model_c_fusion", gmm, seq_det)
+        threshold = fusion.threshold
 
-        meta_learner = joblib.load(models_dir / "model_c_meta_rf.pkl")
-        h_params     = joblib.load(models_dir / "model_c_params.pkl")
-
-        hybrid = HybridDetector(
-            gmm_model=gmm._clf,
-            lstm_ae_model=lstm_ae.model,
-            meta_learner=meta_learner,
-            window_size=h_params["window_size"],
-            stride=h_params["stride"],
-            val_gmm_min=h_params["val_gmm_min"],
-            val_gmm_max=h_params["val_gmm_max"],
-            val_lstm_min=h_params["val_lstm_min"],
-            val_lstm_max=h_params["val_lstm_max"],
-        )
-        threshold = h_params["threshold"]
-
-        y_scores_h = hybrid.score(X_test_h)
+        y_scores_h = fusion.score(X_test_h)
         y_pred_h   = (y_scores_h >= threshold).astype(int)
         metrics_h  = compute_metrics(y_test_h, y_pred_h, y_scores_h)
 

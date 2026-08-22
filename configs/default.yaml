@@ -7,7 +7,6 @@
 paths:
   data_dir:        data/CICIDS2017          # raw CSV files
   prep_dir:        outputs/preprocessing   # X_train.npy, X_test.npy, y_test.npy
-  seq_dir:         outputs/sequences       # X_train_seq.npy, X_test_seq.npy
   models_dir:      models
   outputs_dir:     outputs/models
   results_dir:     results
@@ -50,30 +49,79 @@ ocsvm:
   train_cap:   8000
 
 # ─────────────────────────────────────────────────────────────
+# Phase 2 — Sequence anomaly detection
+# ─────────────────────────────────────────────────────────────
+phase2:
+  model:         lstm_ae     # 'lstm_ae' | 'transformer_ae' | 'usad'
+  train_stride:  5           # step between training window starts
+  eval_stride:   1           # stride when scoring flows (1 = full coverage)
+  max_windows:   null        # cap training windows (null = all)
+
+# ─────────────────────────────────────────────────────────────
 # Phase 2 — Model B : LSTM Autoencoder
 # ─────────────────────────────────────────────────────────────
 lstm_ae:
   window_size:      50
   latent_dim:       32
   dropout_rate:     0.2
+  lr:               0.001
   epochs:           100
   batch_size:       256
   patience:         10
-  val_split:        0.1          # fraction of train sequences held for validation
+  val_split:        0.1          # fraction of train windows held for validation
   threshold_pct:    95           # percentile of benign val scores → decision threshold
 
 # ─────────────────────────────────────────────────────────────
-# Phase 3 — Model C : Hybrid GMM + LSTM-AE + RF meta-learner
+# Phase 2 — Alternative: Transformer Autoencoder
+# ─────────────────────────────────────────────────────────────
+transformer_ae:
+  window_size:      50
+  d_model:          64
+  num_heads:        4
+  latent_dim:       32
+  dropout_rate:     0.1
+  lr:               0.001
+  epochs:           100
+  batch_size:       256
+  patience:         10
+  val_split:        0.1
+  threshold_pct:    95
+
+# ─────────────────────────────────────────────────────────────
+# Phase 2 — Alternative: USAD (adversarial AE)
+# ─────────────────────────────────────────────────────────────
+usad:
+  window_size:      50
+  hidden_dim:       64
+  latent_dim:       32
+  alpha:            0.5
+  lr:               0.001
+  epochs:           50
+  batch_size:       256
+  threshold_pct:    95
+
+# ─────────────────────────────────────────────────────────────
+# Flow-level deep baseline: Deep SVDD
+# ─────────────────────────────────────────────────────────────
+deep_svdd:
+  hidden_dim:       64
+  latent_dim:       8
+  lr:               0.001
+  epochs:           100
+  batch_size:       512
+  patience:         10
+  threshold_pct:    95
+
+# ─────────────────────────────────────────────────────────────
+# Phase 3 — Model C : calibrated fusion (leak-free)
 # ─────────────────────────────────────────────────────────────
 hybrid:
-  window_size:        50
-  stride:             25
-  alpha:              0.7        # GMM weight in simple weighted average
-  meta_learner:       rf         # 'rf' | 'lr' | 'weighted'
-  rf_n_estimators:    100
+  alpha:              0.7        # GMM weight in the weighted-average fallback
   threshold:          0.5
-  meta_train_frac:    0.4        # fraction of labeled pool used to FIT the meta-learner;
-                                 # metrics are reported on the remaining held-out part only
+  meta_train_frac:    0.4        # fraction of labeled pool used to FIT calibrators +
+                                 # meta-learner; metrics reported on the rest only
+  candidates:         [rf, lr, weighted]   # compared by CV PR-AUC inside meta-fit
+  cv_folds:           3
 
 # ─────────────────────────────────────────────────────────────
 # Evaluation
