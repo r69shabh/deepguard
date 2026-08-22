@@ -15,7 +15,6 @@ from typing import Any, Dict, Optional, Union
 import numpy as np
 import yaml
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────────────────────────────────────
@@ -144,3 +143,49 @@ def ensure_dirs(*paths: Union[str, pathlib.Path]) -> None:
 def project_root() -> pathlib.Path:
     """Return the project root directory (two levels above this file)."""
     return pathlib.Path(__file__).parent.parent
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Validation splits
+# ──────────────────────────────────────────────────────────────────────────────
+
+def labeled_holdout_split(
+    y: np.ndarray,
+    meta_frac: float = 0.4,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Stratified index split of a labeled pool into disjoint meta-fit / eval parts.
+
+    Used by the hybrid fusion stage: any supervised component (the meta-learner)
+    must be fitted exclusively on the meta-fit part; final metrics are computed
+    only on the eval part. This removes the train-on-test leakage that inflated
+    earlier reported scores.
+
+    Parameters
+    ----------
+    y : np.ndarray of int — binary labels of the labeled pool.
+    meta_frac : float — fraction of the pool assigned to meta-fit.
+    seed : int — RNG seed.
+
+    Returns
+    -------
+    (meta_idx, eval_idx) : np.ndarray of int — disjoint index arrays whose
+    union covers range(len(y)).
+    """
+    rng = np.random.RandomState(seed)
+    y = np.asarray(y)
+    meta_idx, eval_idx = [], []
+    for cls in np.unique(y):
+        cls_idx = np.where(y == cls)[0]
+        rng.shuffle(cls_idx)
+        n_meta = max(1, int(round(len(cls_idx) * meta_frac))) if len(cls_idx) > 1 else len(cls_idx)
+        meta_idx.append(cls_idx[:n_meta])
+        eval_idx.append(cls_idx[n_meta:])
+    meta = np.sort(np.concatenate(meta_idx))
+    ev = np.sort(np.concatenate(eval_idx))
+    if len(ev) == 0:
+        raise ValueError(
+            "Eval split is empty: reduce hybrid.meta_train_frac or provide more data."
+        )
+    return meta, ev

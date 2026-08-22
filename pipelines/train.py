@@ -28,15 +28,21 @@ import pandas as pd
 ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from deepguard.utils import setup_logging, set_seed, load_config, get_nested, ensure_dirs
+from deepguard.evaluate import compute_metrics
 from deepguard.models import (
     GMMDetector,
-    IsolationForestDetector,
-    OCSVMDetector,
-    LSTMAEDetector,
     HybridDetector,
+    IsolationForestDetector,
+    LSTMAEDetector,
+    OCSVMDetector,
 )
-from deepguard.evaluate import compute_metrics, generate_report
+from deepguard.utils import (
+    ensure_dirs,
+    labeled_holdout_split,
+    load_config,
+    set_seed,
+    setup_logging,
+)
 
 logger = setup_logging()
 
@@ -202,37 +208,48 @@ def train_phase2(cfg: dict, X_train_seq: np.ndarray, X_test_seq: np.ndarray,
 def train_phase3(cfg: dict, gmm: GMMDetector, lstm_ae: LSTMAEDetector,
                  X_train: np.ndarray, X_test: np.ndarray, y_test: np.ndarray,
                  models_dir: pathlib.Path, results_dir: pathlib.Path) -> HybridDetector:
-    """Build and evaluate Hybrid RF meta-learner (Model C)."""
+    """
+    Build and evaluate Hybrid RF meta-learner (Model C) without test leakage.
 
-    logger.info("=" * 60)
-    logger.info("PHASE 3 — Hybrid GMM + LSTM-AE (Model C)")
-    logger.info("=" * 60)
+    Protocol
+    --------
+    The labeled pool (X_test, y_test) is split into two disjoint parts:
+      - meta-fit  : scores here (+ labels) train the meta-learner
+      - eval-only : NEVER seen by the meta-learner; all reported metrics
+                    and the saved evaluation mask refer to this part only.
+    Normalisation stats come from a benign calibration slice of X_train.
+    """
 
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.linear_model import LogisticRegression
 
+    logger.info("=" * 60)
+    logger.info("PHASE 3 — Hybrid GMM + LSTM-AE (Model C, leak-free protocol)")
+    logger.info("=" * 60)
+
     hybrid_cfg = cfg.get("hybrid", {})
     window_size = hybrid_cfg.get("window_size", 50)
     stride      = hybrid_cfg.get("stride", 25)
+    meta_frac   = hybrid_cfg.get("meta_train_frac", 0.4)
+    seed        = cfg.get("seed", 42)
 
-    # ── Calibration scores on validation benign (first 20% of X_train) ───────
+    # ── Calibration scores on benign slice of X_train ────────────────────────
     n_cal = min(50_000, int(len(X_train) * 0.2))
     X_cal = X_train[:n_cal]
 
-    # Temporary hybrid for normalisation stats
     _tmp = HybridDetector(
         gmm_model=gmm._clf,
         lstm_ae_model=lstm_ae.model,
         window_size=window_size,
         stride=stride,
     )
-    s_gmm_cal  = _tmp._gmm_scores(X_cal)
-    val_gmm_min, val_gmm_max   = float(s_gmm_cal.min()),  float(s_gmm_cal.max())
+    s_gmm_cal = _tmp._gmm_scores(X_cal)
+    val_gmm_min, val_gmm_max = float(s_gmm_cal.min()), float(s_gmm_cal.max())
     s_lstm_cal = _tmp._lstm_scores(X_cal)
     val_lstm_min, val_lstm_max = float(s_lstm_cal.min()), float(s_lstm_cal.max())
 
-    # ── Build meta-learner training set ──────────────────────────────────────
-    logger.info("Scoring test set for meta-learner …")
+    # ── Score the labeled pool ONCE, then split indices ──────────────────────
+    logger.info("Scoring labeled pool for meta-learner …")
     hybrid_base = HybridDetector(
         gmm_model=gmm._clf,
         lstm_ae_model=lstm_ae.model,
@@ -243,29 +260,30 @@ def train_phase3(cfg: dict, gmm: GMMDetector, lstm_ae: LSTMAEDetector,
         val_lstm_min=val_lstm_min,
         val_lstm_max=val_lstm_max,
     )
-    s_gmm_test  = hybrid_base._gmm_scores(X_test)
-    s_lstm_test = hybrid_base._lstm_scores(X_test)
+    X_meta_pool = np.column_stack([
+        hybrid_base._gmm_scores(X_test),
+        hybrid_base._lstm_scores(X_test),
+    ])
 
-    # Use a 20% stratified subset for meta-learner training
-    from sklearn.model_selection import train_test_split
-    X_meta = np.column_stack([s_gmm_test, s_lstm_test])
-    X_meta_tr, _, y_meta_tr, _ = train_test_split(
-        X_meta, y_test, test_size=0.8, stratify=y_test, random_state=42
+    meta_idx, eval_idx = labeled_holdout_split(y_test, meta_frac=meta_frac, seed=seed)
+    logger.info(
+        f"  Meta-fit: {len(meta_idx):,} rows ({y_test[meta_idx].mean():.2%} attacks)  |  "
+        f"Eval-only: {len(eval_idx):,} rows ({y_test[eval_idx].mean():.2%} attacks)"
     )
 
-    # ── Fit meta-learner ──────────────────────────────────────────────────────
+    # ── Fit meta-learner on meta-fit part ONLY ────────────────────────────────
     meta_type = hybrid_cfg.get("meta_learner", "rf")
-    logger.info(f"Fitting meta-learner ({meta_type}) …")
+    logger.info(f"Fitting meta-learner ({meta_type}) on meta-fit split …")
     if meta_type == "lr":
-        meta = LogisticRegression(C=1.0, max_iter=500, random_state=42)
+        meta = LogisticRegression(C=1.0, max_iter=500, random_state=seed)
     else:
         meta = RandomForestClassifier(
             n_estimators=hybrid_cfg.get("rf_n_estimators", 100),
-            random_state=42, n_jobs=-1
+            random_state=seed, n_jobs=-1
         )
-    meta.fit(X_meta_tr, y_meta_tr)
+    meta.fit(X_meta_pool[meta_idx], y_test[meta_idx])
 
-    # ── Final hybrid model ────────────────────────────────────────────────────
+    # ── Final hybrid model (metrics computed on eval-only part) ──────────────
     hybrid = HybridDetector(
         gmm_model=gmm._clf,
         lstm_ae_model=lstm_ae.model,
@@ -278,24 +296,38 @@ def train_phase3(cfg: dict, gmm: GMMDetector, lstm_ae: LSTMAEDetector,
         val_lstm_max=val_lstm_max,
     )
     threshold = hybrid_cfg.get("threshold", 0.5)
-    metrics   = hybrid.evaluate(X_test, y_test, threshold=threshold)
-    logger.info(
-        f"  Hybrid F1={metrics['f1']:.4f}  AUC={metrics['auc']:.4f}  "
-        f"Precision={metrics['precision']:.4f}  Recall={metrics['recall']:.4f}"
+    metrics   = hybrid.evaluate(
+        X_test[eval_idx], y_test[eval_idx], threshold=threshold
     )
 
-    # ── Save ──────────────────────────────────────────────────────────────────
+    # Honest fallback comparison: simple weighted average needs no fitting
+    alpha = hybrid_cfg.get("alpha", 0.7)
+    w_scores = alpha * X_meta_pool[:, 0] + (1.0 - alpha) * X_meta_pool[:, 1]
+    w_metrics = compute_metrics(y_test[eval_idx], (w_scores[eval_idx] >= threshold).astype(int), w_scores[eval_idx])
+
+    logger.info(
+        f"  Hybrid(meta) F1={metrics['f1']:.4f}  AUC={metrics['auc']:.4f}  "
+        f"P={metrics['precision']:.4f}  R={metrics['recall']:.4f}   [eval-only]"
+    )
+    logger.info(
+        f"  Weighted(α={alpha}) F1={w_metrics['f1']:.4f}  AUC={w_metrics['auc']:.4f}   [eval-only]"
+    )
+
+    # ── Save (incl. eval mask so downstream evaluation matches this protocol) ─
     joblib.dump(meta, models_dir / "model_c_meta_rf.pkl")
     joblib.dump(
         {
             "val_gmm_min": val_gmm_min, "val_gmm_max": val_gmm_max,
             "val_lstm_min": val_lstm_min, "val_lstm_max": val_lstm_max,
             "window_size": window_size, "stride": stride, "threshold": threshold,
+            "meta_train_frac": meta_frac, "seed": seed,
         },
         models_dir / "model_c_params.pkl",
     )
+    np.save(models_dir / "model_c_eval_mask.npy", eval_idx)
+
     results_csv = results_dir / "model_c_metrics.csv"
-    pd.DataFrame([metrics]).to_csv(results_csv, index=False)
+    pd.DataFrame([{**metrics, "protocol": "held-out eval split"}]).to_csv(results_csv, index=False)
     logger.info(f"Phase 3 results → {results_csv}")
 
     return hybrid

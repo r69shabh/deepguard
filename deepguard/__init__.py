@@ -13,12 +13,12 @@ __version__ = "1.0.0"
 __author__  = "Rishabh Gusain"
 
 from deepguard.features import FeatureEngineer
-from deepguard.models   import (
+from deepguard.models import (
     GMMDetector,
-    IsolationForestDetector,
-    OCSVMDetector,
-    LSTMAEDetector,
     HybridDetector,
+    IsolationForestDetector,
+    LSTMAEDetector,
+    OCSVMDetector,
 )
 
 __all__ = [

@@ -12,22 +12,29 @@ Run from project root:
     python3 scripts/run_ablation.py
 """
 
-import os, sys, time, gc, warnings
+import gc
+import os
+import time
+import warnings
+
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL']   = '3'
 os.environ['TF_NUM_INTEROP_THREADS'] = '2'
 os.environ['TF_NUM_INTRAOP_THREADS'] = '4'
 
+import matplotlib
 import numpy as np
 import pandas as pd
-import matplotlib
+
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from pathlib import Path
-from scipy.stats import ks_2samp
+
+import matplotlib.pyplot as plt
 
 # ── TensorFlow with memory limit ─────────────────────────────────────────────
 import tensorflow as tf
+from scipy.stats import ks_2samp
+
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     for g in gpus:
@@ -35,14 +42,22 @@ if gpus:
 tf.random.set_seed(42)
 np.random.seed(42)
 
-from tensorflow.keras.models import Model
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score, roc_curve
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.layers import (
-    Input, Dense, Dropout, LayerNormalization,
-    MultiHeadAttention, GlobalAveragePooling1D, Reshape,
-    LSTM, RepeatVector, TimeDistributed
+    LSTM,
+    Dense,
+    Dropout,
+    GlobalAveragePooling1D,
+    Input,
+    LayerNormalization,
+    MultiHeadAttention,
+    RepeatVector,
+    Reshape,
+    TimeDistributed,
 )
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, roc_curve
+from tensorflow.keras.models import Model
+
 
 def log(msg):
     print(msg, flush=True)
@@ -118,7 +133,7 @@ def best_threshold_f1(flow_scores, y_flow, val_win_scores):
         tau = float(np.percentile(val_win_scores, pct))
         f   = f1_score(y_flow, (flow_scores > tau).astype(np.int32), zero_division=0)
         if f > best_f1:
-            best_f1, best_tau = f, tau
+            best_f1 = f
     return best_f1, best_tau
 
 
@@ -136,12 +151,12 @@ def quick_eval_sampled(model, X_test_sample, y_test_sample,
     v_sc    = np.mean(np.square(X_val_sample - recon_v), axis=(1, 2))
     del recon_v; gc.collect()
 
-    best_f1, best_tau = 0.0, float(np.median(v_sc))
+    best_f1 = 0.0
     for pct in range(1, 31):
         tau = float(np.percentile(v_sc, pct))
         f   = f1_score(y_test_sample, (w_sc > tau).astype(np.int32), zero_division=0)
         if f > best_f1:
-            best_f1, best_tau = f, tau
+            best_f1 = f
     try:
         auc = float(roc_auc_score(y_test_sample, w_sc))
     except Exception:

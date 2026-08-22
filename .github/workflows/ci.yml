@@ -2,9 +2,11 @@ name: Python application
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - "**"
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - "**"
 
 jobs:
   build:
@@ -20,7 +22,10 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -e .
+        pip install -e ".[dev]"
+    - name: Lint with ruff
+      run: |
+        ruff check deepguard pipelines scripts main.py
     - name: Test with pytest
       run: |
-        pytest tests/
+        pytest tests/ --cov=deepguard --cov-report=term-missing

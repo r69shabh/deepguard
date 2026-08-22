@@ -19,6 +19,7 @@ import pathlib
 from typing import Dict, List, Optional, Union
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,7 +34,6 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -166,8 +166,8 @@ def plot_confusion_matrix(
     fig, ax = plt.subplots(figsize=(6, 5))
     sns.heatmap(
         cm_pct, annot=True, fmt=".1f", cmap="Blues",
-        xticklabels=[f"Pred {l}" for l in labels],
-        yticklabels=[f"True {l}" for l in labels],
+        xticklabels=[f"Pred {lbl}" for lbl in labels],
+        yticklabels=[f"True {lbl}" for lbl in labels],
         ax=ax, linewidths=0.5, cbar_kws={"label": "% of true class"},
     )
     # Add raw counts as secondary annotation
@@ -270,7 +270,8 @@ def per_class_detection_rate(
             "Missed": missed,
             "Detection Rate (%)": f"{rate:.1f}%",
         })
-    df = pd.DataFrame(rows); return df.sort_values("Total", ascending=False) if not df.empty else df
+    df = pd.DataFrame(rows)
+    return df.sort_values("Total", ascending=False) if not df.empty else df
 
 
 def generate_report(

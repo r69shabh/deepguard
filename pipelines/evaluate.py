@@ -20,20 +20,19 @@ import sys
 
 import joblib
 import numpy as np
-import pandas as pd
 
 ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from deepguard.utils import setup_logging, set_seed, load_config, ensure_dirs
-from deepguard.models import GMMDetector, LSTMAEDetector, HybridDetector
 from deepguard.evaluate import (
     compute_metrics,
-    plot_roc_curve,
-    plot_confusion_matrix,
-    plot_score_distribution,
     generate_report,
+    plot_confusion_matrix,
+    plot_roc_curve,
+    plot_score_distribution,
 )
+from deepguard.models import GMMDetector, HybridDetector, LSTMAEDetector
+from deepguard.utils import ensure_dirs, load_config, set_seed, setup_logging
 
 logger = setup_logging()
 
@@ -54,6 +53,7 @@ def run(config_path: str = "configs/default.yaml") -> None:
 
     # 1. Evaluate GMM (Model A)
     logger.info("Evaluating GMM (Model A)...")
+    metrics_gmm = None
     try:
         gmm = GMMDetector.load(models_dir / "model_a_gmm.pkl")
         y_scores_gmm = gmm.score(X_test)
@@ -75,13 +75,27 @@ def run(config_path: str = "configs/default.yaml") -> None:
     except Exception as e:
         logger.error(f"Failed to evaluate GMM: {e}")
 
-    # 2. Evaluate Hybrid (Model C)
+    # 2. Evaluate Hybrid (Model C) — on the held-out eval split only
     logger.info("Evaluating Hybrid Detector (Model C)...")
     try:
+        # The meta-learner was fitted on a disjoint slice; restrict evaluation
+        # to the saved eval-only indices so reported metrics stay leak-free.
+        mask_path = models_dir / "model_c_eval_mask.npy"
+        if mask_path.exists():
+            eval_idx = np.load(mask_path)
+            X_test_h, y_test_h = X_test[eval_idx], y_test[eval_idx]
+            logger.info(f"  Using held-out eval split ({len(eval_idx):,} rows).")
+        else:
+            X_test_h, y_test_h = X_test, y_test
+            logger.warning(
+                "  No eval mask found (model_c_eval_mask.npy) — retrain with the "
+                "current pipeline for leak-free hybrid numbers."
+            )
+
         import tensorflow as tf
         lstm_ae = LSTMAEDetector()
         lstm_ae.model = tf.keras.models.load_model(str(models_dir / "lstm_ae_best.keras"))
-        
+
         meta_learner = joblib.load(models_dir / "model_c_meta_rf.pkl")
         h_params     = joblib.load(models_dir / "model_c_params.pkl")
 
@@ -98,17 +112,17 @@ def run(config_path: str = "configs/default.yaml") -> None:
         )
         threshold = h_params["threshold"]
 
-        y_scores_h = hybrid.score(X_test)
+        y_scores_h = hybrid.score(X_test_h)
         y_pred_h   = (y_scores_h >= threshold).astype(int)
-        metrics_h  = compute_metrics(y_test, y_pred_h, y_scores_h)
+        metrics_h  = compute_metrics(y_test_h, y_pred_h, y_scores_h)
 
         if cfg["evaluation"].get("roc_plot"):
-            plot_roc_curve(y_test, y_scores_h, label="Hybrid", save_path=outputs_dir / "hybrid_roc.png")
+            plot_roc_curve(y_test_h, y_scores_h, label="Hybrid", save_path=outputs_dir / "hybrid_roc.png")
         if cfg["evaluation"].get("cm_plot"):
-            plot_confusion_matrix(y_test, y_pred_h, save_path=outputs_dir / "hybrid_cm.png")
+            plot_confusion_matrix(y_test_h, y_pred_h, save_path=outputs_dir / "hybrid_cm.png")
         if cfg["evaluation"].get("score_dist_plot"):
             plot_score_distribution(
-                y_scores_h[y_test == 0], y_scores_h[y_test == 1],
+                y_scores_h[y_test_h == 0], y_scores_h[y_test_h == 1],
                 save_path=outputs_dir / "hybrid_score_dist.png",
                 threshold=threshold, model_name="Hybrid Detector"
             )
