@@ -137,6 +137,27 @@ evaluation:
   prevalences:      [0.20, 0.10, 0.05, 0.01]  # low-prevalence sweep grid
 
 # ─────────────────────────────────────────────────────────────
+# Drift monitoring + adaptation
+# ─────────────────────────────────────────────────────────────
+monitor:
+  ph_tau:            40         # Page-Hinckley threshold (score stream)
+  ph_lambda:         0.1        # PH drift margin (≈ score_std / 10)
+  ph_alert_tau:      15         # PH threshold for the alert-rate series
+  adwin_delta:       0.0005     # ADWIN confidence (smaller = fewer false alarms)
+  adwin_max_window:  5000       # bounded-memory cap on the adaptive window
+  ks_alpha:          0.001      # KS test significance level
+  ks_window:         1000       # recent-window size for the KS detector
+
+adapt:
+  buffer_capacity:     20000    # size of the recent-benign buffer
+  buffer_mode:         sliding  # sliding (recency-biased) | reservoir (uniform)
+  min_buffer_to_adapt: 1500     # refuse adaptation below this buffer size
+  min_attempt_interval: 100    # min stream steps between adaptation attempts
+  fpr_tolerance:       0.30     # accept refit if val-FPR grows ≤ this relatively
+  recall_tolerance:    0.05     # and val-recall drops ≤ this absolutely
+  validation_fraction: 0.10     # labeled pool fraction reserved to gate adaptation
+
+# ─────────────────────────────────────────────────────────────
 # Detection (inference mode)
 # ─────────────────────────────────────────────────────────────
 detect:

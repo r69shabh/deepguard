@@ -58,6 +58,23 @@ hybrid:
   candidates:         [rf, lr, weighted]
   cv_folds:           3
 
+monitor:
+  ph_tau:            40
+  ph_lambda:         0.1
+  ph_alert_tau:      15
+  adwin_delta:       0.0005
+  adwin_max_window:  2000
+  ks_alpha:          0.001
+  ks_window:         300
+
+adapt:
+  buffer_capacity:     5000
+  min_buffer_to_adapt: 80
+  min_attempt_interval: 50
+  fpr_tolerance:       0.30
+  recall_tolerance:    0.05
+  validation_fraction: 0.10
+
 evaluation:
   roc_plot:         false
   cm_plot:          false
